@@ -1,0 +1,152 @@
+blueprint:
+  name: PV Heating Rod Automation
+  description: |
+    Controls up to three heating rods based on PV surplus and battery state of charge (SOC).
+    This automation turns on heating rods according to configured surplus power thresholds
+    and a minimum battery SOC requirement. It also includes delays to avoid power spikes.
+  domain: automation
+  input:
+    pv_sensor:
+      name: PV Surplus Sensor
+      selector:
+        entity:
+          domain: sensor
+    battery_soc:
+      name: Battery SOC Sensor
+      selector:
+        entity:
+          domain: sensor
+    threshold_1:
+      name: Minimum surplus for Heating Rod 1 (1 kW)
+      default: 1000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: W
+          step: 100
+    threshold_2:
+      name: Minimum surplus for Heating Rod 2 (2 kW)
+      default: 3000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: W
+          step: 100
+    threshold_3:
+      name: Minimum surplus for Heating Rod 3 (3 kW)
+      default: 5000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: W
+          step: 100
+    battery_limit:
+      name: Minimum Battery SOC (%)
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+          step: 1
+    switch_p1:
+      name: Switch for Heating Rod 1 (1 kW)
+      selector:
+        entity:
+          domain: switch
+    switch_p2:
+      name: Switch for Heating Rod 2 (2 kW)
+      selector:
+        entity:
+          domain: switch
+    switch_p3:
+      name: Switch for Heating Rod 3 (3 kW)
+      selector:
+        entity:
+          domain: switch
+
+trigger:
+  - platform: state
+    entity_id: !input pv_sensor
+  - platform: state
+    entity_id: !input battery_soc
+  - platform: time_pattern
+    minutes: "/5"
+
+condition:
+  - condition: numeric_state
+    entity_id: !input battery_soc
+    above: !input battery_limit
+
+action:
+  - variables:
+      pv: "{{ states(!input pv_sensor) | float(0) }}"
+      soc: "{{ states(!input battery_soc) | float(0) }}"
+      limit1: !input threshold_1
+      limit2: !input threshold_2
+      limit3: !input threshold_3
+
+  - choose:
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            above: !input threshold_3
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p3
+          - delay: "00:00:10"
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p2
+          - delay: "00:00:10"
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p1
+
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            above: !input threshold_2
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input switch_p3
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p2
+          - delay: "00:00:10"
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p1
+
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            above: !input threshold_1
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id:
+                - !input switch_p2
+                - !input switch_p3
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p1
+
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            below: !input threshold_1
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id:
+                - !input switch_p1
+                - !input switch_p2
+                - !input switch_p3
+
+mode: restart
