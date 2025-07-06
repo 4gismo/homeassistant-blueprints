@@ -1,7 +1,8 @@
+
 blueprint:
   name: PV Heating Rod Automation (Custom Stages)
   description: |
-    Version 1.1.0
+    Version 1.2.0
 
     Controls up to three heating rods based on PV surplus and battery SOC.
     Each stage corresponds to a specific combination of heating rods according to PV surplus thresholds.
@@ -106,6 +107,16 @@ blueprint:
           max: 300
           unit_of_measurement: s
           step: 1
+
+    lock_time_after_switching:
+      name: Lock Time After Switching (minutes)
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: min
+          step: 1
     switch_p1:
       name: Switch for Heating Rod 1 (1 kW)
       selector:
@@ -150,12 +161,12 @@ action:
             target:
               entity_id: !input switch_p1
           - delay:
-              seconds: !input delay_between_switches
+              seconds: 5
           - service: switch.turn_on
             target:
               entity_id: !input switch_p2
           - delay:
-              seconds: !input delay_between_switches
+              seconds: 5
           - service: switch.turn_on
             target:
               entity_id: !input switch_p3
@@ -168,7 +179,7 @@ action:
             target:
               entity_id: !input switch_p2
           - delay:
-              seconds: !input delay_between_switches
+              seconds: 5
           - service: switch.turn_on
             target:
               entity_id: !input switch_p3
@@ -184,7 +195,7 @@ action:
             target:
               entity_id: !input switch_p1
           - delay:
-              seconds: !input delay_between_switches
+              seconds: 5
           - service: switch.turn_on
             target:
               entity_id: !input switch_p3
@@ -249,6 +260,11 @@ action:
         - !input switch_p1
         - !input switch_p2
         - !input switch_p3
+
+
+
+  - delay:
+      minutes: !input lock_time_after_switching
 
 
 mode: restart
