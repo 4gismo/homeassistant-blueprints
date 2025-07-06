@@ -1,7 +1,7 @@
 blueprint:
   name: PV Heating Rod Automation (Custom Stages)
   description: |
-    Version 1.0.0
+    Version 1.1.0
 
     Controls up to three heating rods based on PV surplus and battery SOC.
     Each stage corresponds to a specific combination of heating rods according to PV surplus thresholds.
@@ -85,6 +85,27 @@ blueprint:
           max: 10000
           step: 100
           unit_of_measurement: W
+
+
+    start_time:
+      name: Automation Start Time (Daytime Start)
+      default: "08:00:00"
+      selector:
+        time: {}
+    end_time:
+      name: Automation End Time (Daytime End)
+      default: "18:00:00"
+      selector:
+        time: {}
+    delay_between_switches:
+      name: Delay Between Switches (seconds)
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 300
+          unit_of_measurement: s
+          step: 1
     switch_p1:
       name: Switch for Heating Rod 1 (1 kW)
       selector:
@@ -110,6 +131,10 @@ trigger:
     minutes: "/5"
 
 condition:
+  - condition: time
+    after: !input start_time
+    before: !input end_time
+
   - condition: numeric_state
     entity_id: !input battery_soc
     above: !input battery_limit
@@ -123,10 +148,17 @@ action:
         sequence:
           - service: switch.turn_on
             target:
-              entity_id:
-                - !input switch_p1
-                - !input switch_p2
-                - !input switch_p3
+              entity_id: !input switch_p1
+          - delay:
+              seconds: !input delay_between_switches
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p2
+          - delay:
+              seconds: !input delay_between_switches
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p3
       - conditions:
           - condition: numeric_state
             entity_id: !input pv_sensor
@@ -134,9 +166,12 @@ action:
         sequence:
           - service: switch.turn_on
             target:
-              entity_id:
-                - !input switch_p2
-                - !input switch_p3
+              entity_id: !input switch_p2
+          - delay:
+              seconds: !input delay_between_switches
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p3
           - service: switch.turn_off
             target:
               entity_id: !input switch_p1
@@ -147,9 +182,12 @@ action:
         sequence:
           - service: switch.turn_on
             target:
-              entity_id:
-                - !input switch_p1
-                - !input switch_p3
+              entity_id: !input switch_p1
+          - delay:
+              seconds: !input delay_between_switches
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p3
           - service: switch.turn_off
             target:
               entity_id: !input switch_p2
@@ -203,5 +241,14 @@ action:
                 - !input switch_p1
                 - !input switch_p2
                 - !input switch_p3
+
+
+  - service: switch.turn_off
+    target:
+      entity_id:
+        - !input switch_p1
+        - !input switch_p2
+        - !input switch_p3
+
 
 mode: restart
