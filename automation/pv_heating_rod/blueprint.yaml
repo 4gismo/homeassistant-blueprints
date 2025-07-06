@@ -192,7 +192,7 @@ action:
           - service: switch.turn_on
             target:
               entity_id: !input switch_p3
-                          - conditions:
+      - conditions:
           - condition: numeric_state
             entity_id: !input pv_sensor
             above: !input stage_1_threshold
@@ -206,10 +206,6 @@ action:
             target:
               entity_id: !input switch_p1
           
-
-  
-
-
   - delay:
       minutes: !input lock_time_after_switching
 
