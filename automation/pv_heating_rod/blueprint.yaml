@@ -1,17 +1,12 @@
 blueprint:
   name: PV Heating Rod Automation (Custom Stages)
   description: |
+    Version 1.0.0
+
     Controls up to three heating rods based on PV surplus and battery SOC.
     Each stage corresponds to a specific combination of heating rods according to PV surplus thresholds.
   domain: automation
-  version: "1.0.0"
   source_url: "https://raw.githubusercontent.com/4gismo/homeassistant-blueprints/main/automation/pv_heating_rod/blueprint.yaml"
-  tags:
-    - pv
-    - heating
-    - energy
-    - automation
-  maintainer: "Gero (GitHub: @4gismo)"
   description: |
     Controls up to three heating rods based on PV surplus and battery SOC.
     Each stage corresponds to a specific combination of heating rods according to PV surplus thresholds.
