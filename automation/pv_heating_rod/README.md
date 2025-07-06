@@ -1,20 +1,31 @@
+
 # PV Heating Rod Automation Blueprint for Home Assistant
 
-This repository contains a Home Assistant automation blueprint for controlling heating rods based on photovoltaic (PV) surplus power and the battery state of charge (SOC).
+This blueprint controls up to three heating rods based on photovoltaic (PV) surplus and the battery state of charge (SOC).
 
 ---
 
 ## 📋 About This Blueprint
 
-This automation automatically switches up to **three heating rods** according to the available PV surplus and the battery SOC.  
-It also uses **delays** between switching actions to avoid sudden power spikes.
+This automation switches heating rods according to predefined PV surplus thresholds and the battery SOC.  
+It uses a **stage-based control logic**, where each stage activates specific combinations of heating rods according to the available PV surplus.
 
-**Key Features:**
-- Automatically adjusts heating rod power levels based on PV surplus
-- Only activates heating rods when the battery SOC exceeds a defined limit
-- Supports three independent heating rods (1 kW, 2 kW, 3 kW)
-- Customizable thresholds for each rod
-- Includes automatic step-down and shutdown logic
+---
+
+### 🔥 Stage Table (Heating Rod Combination per Stage)
+
+| Stage (kW) | Heating Rod 1 (1 kW) | Heating Rod 2 (2 kW) | Heating Rod 3 (3 kW) | Total Power |
+|------------|----------------------|----------------------|----------------------|-------------|
+| 0          | OFF                  | OFF                  | OFF                  | 0 kW        |
+| 1          | ON                   | OFF                  | OFF                  | 1 kW        |
+| 2          | OFF                  | ON                   | OFF                  | 2 kW        |
+| 3          | OFF                  | OFF                  | ON                   | 3 kW        |
+| 4          | ON                   | OFF                  | ON                   | 4 kW        |
+| 5          | OFF                  | ON                   | ON                   | 5 kW        |
+| 6          | ON                   | ON                   | ON                   | 6 kW        |
+
+Each stage is triggered by a configurable PV surplus threshold (in watts).  
+The heating rods are switched automatically according to the table above.
 
 ---
 
@@ -23,8 +34,8 @@ It also uses **delays** between switching actions to avoid sudden power spikes.
 ```
 blueprints/
 └── automation/
-    └── pv_heating_rod/
-        └── blueprint.yaml  # PV Heating Rod Automation Blueprint
+    └── pv_heating_rod_custom_stages/
+        └── blueprint.yaml  # PV Heating Rod Automation Blueprint (Custom Stages)
 ```
 
 ---
@@ -33,7 +44,7 @@ blueprints/
 
 1. Copy this folder into your Home Assistant configuration directory:
 ```
-/config/blueprints/automation/pv_heating_rod/
+/config/blueprints/automation/pv_heating_rod_custom_stages/
 ```
 
 2. In Home Assistant:
@@ -42,7 +53,7 @@ blueprints/
 
 3. Configure the automation:
    - Select your PV surplus sensor and battery SOC sensor.
-   - Set the minimum surplus thresholds for each heating rod.
+   - Set the minimum PV surplus thresholds for each stage.
    - Set the minimum battery SOC required for operation.
    - Assign the switches controlling each heating rod.
 
