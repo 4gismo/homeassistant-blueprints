@@ -4,6 +4,7 @@ blueprint:
     Controls up to three heating rods based on PV surplus and battery SOC.
     Each stage corresponds to a specific combination of heating rods according to PV surplus thresholds.
   domain: automation
+  version: "0.2.0"
   input:
     pv_sensor:
       name: PV Surplus Sensor
