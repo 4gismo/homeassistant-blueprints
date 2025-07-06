@@ -1,9 +1,8 @@
 blueprint:
-  name: PV Heating Rod Automation
+  name: PV Heating Rod Automation (Custom Stages)
   description: |
-    Controls up to three heating rods based on PV surplus and battery state of charge (SOC).
-    This automation turns on heating rods according to configured surplus power thresholds
-    and a minimum battery SOC requirement. It also includes delays to avoid power spikes.
+    Controls up to three heating rods based on PV surplus and battery SOC.
+    Each stage corresponds to a specific combination of heating rods according to PV surplus thresholds.
   domain: automation
   input:
     pv_sensor:
@@ -16,33 +15,6 @@ blueprint:
       selector:
         entity:
           domain: sensor
-    threshold_1:
-      name: Minimum surplus for Heating Rod 1 (1 kW)
-      default: 1000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          unit_of_measurement: W
-          step: 100
-    threshold_2:
-      name: Minimum surplus for Heating Rod 2 (2 kW)
-      default: 3000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          unit_of_measurement: W
-          step: 100
-    threshold_3:
-      name: Minimum surplus for Heating Rod 3 (3 kW)
-      default: 5000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          unit_of_measurement: W
-          step: 100
     battery_limit:
       name: Minimum Battery SOC (%)
       default: 30
@@ -52,6 +24,60 @@ blueprint:
           max: 100
           unit_of_measurement: "%"
           step: 1
+    stage_1_threshold:
+      name: Minimum PV Surplus for Stage 1 (1 kW total)
+      default: 1000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+    stage_2_threshold:
+      name: Minimum PV Surplus for Stage 2 (2 kW total)
+      default: 2000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+    stage_3_threshold:
+      name: Minimum PV Surplus for Stage 3 (3 kW total)
+      default: 3000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+    stage_4_threshold:
+      name: Minimum PV Surplus for Stage 4 (4 kW total)
+      default: 4000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+    stage_5_threshold:
+      name: Minimum PV Surplus for Stage 5 (5 kW total)
+      default: 5000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+    stage_6_threshold:
+      name: Minimum PV Surplus for Stage 6 (6 kW total)
+      default: 6000
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 100
+          unit_of_measurement: W
     switch_p1:
       name: Switch for Heating Rod 1 (1 kW)
       selector:
@@ -82,65 +108,87 @@ condition:
     above: !input battery_limit
 
 action:
-  - variables:
-      pv: "{{ states(!input pv_sensor) | float(0) }}"
-      soc: "{{ states(!input battery_soc) | float(0) }}"
-      limit1: !input threshold_1
-      limit2: !input threshold_2
-      limit3: !input threshold_3
-
   - choose:
       - conditions:
           - condition: numeric_state
             entity_id: !input pv_sensor
-            above: !input threshold_3
+            above: !input stage_6_threshold
         sequence:
           - service: switch.turn_on
             target:
-              entity_id: !input switch_p3
-          - delay: "00:00:10"
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p2
-          - delay: "00:00:10"
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p1
-
+              entity_id:
+                - !input switch_p1
+                - !input switch_p2
+                - !input switch_p3
       - conditions:
           - condition: numeric_state
             entity_id: !input pv_sensor
-            above: !input threshold_2
+            above: !input stage_5_threshold
         sequence:
+          - service: switch.turn_on
+            target:
+              entity_id:
+                - !input switch_p2
+                - !input switch_p3
           - service: switch.turn_off
             target:
-              entity_id: !input switch_p3
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p2
-          - delay: "00:00:10"
-          - service: switch.turn_on
-            target:
               entity_id: !input switch_p1
-
       - conditions:
           - condition: numeric_state
             entity_id: !input pv_sensor
-            above: !input threshold_1
+            above: !input stage_4_threshold
         sequence:
+          - service: switch.turn_on
+            target:
+              entity_id:
+                - !input switch_p1
+                - !input switch_p3
+          - service: switch.turn_off
+            target:
+              entity_id: !input switch_p2
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            above: !input stage_3_threshold
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p3
+          - service: switch.turn_off
+            target:
+              entity_id:
+                - !input switch_p1
+                - !input switch_p2
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            above: !input stage_2_threshold
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p2
+          - service: switch.turn_off
+            target:
+              entity_id:
+                - !input switch_p1
+                - !input switch_p3
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input pv_sensor
+            above: !input stage_1_threshold
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input switch_p1
           - service: switch.turn_off
             target:
               entity_id:
                 - !input switch_p2
                 - !input switch_p3
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p1
-
       - conditions:
           - condition: numeric_state
             entity_id: !input pv_sensor
-            below: !input threshold_1
+            below: !input stage_1_threshold
         sequence:
           - service: switch.turn_off
             target:
