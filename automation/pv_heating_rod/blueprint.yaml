@@ -2,7 +2,7 @@
 blueprint:
   name: PV Heating Rod Automation
   description: |
-    Version 2.0
+    Version 2.1
     Controls up to three heating rods based on actual PV feed-in surplus.
 
     Recommended sensor: EMMA "Feed in power" (what is currently going to the grid).
@@ -49,14 +49,23 @@ blueprint:
         surplus_sensor:
           name: PV Surplus Sensor
           description: >
-            Sensor measuring current power going to the grid (feed-in power), in watts.
-            For Huawei systems: use EMMA "Feed in power".
-            This ensures battery has priority over heating rods.
-            If your inverter reports negative values for feed-in, create a template sensor first (see README).
+            Sensor measuring power flow at the grid connection point, in watts.
+            For Huawei EMMA: use "Feed in power".
+            Configure the sign convention below.
           selector:
             entity:
               domain: sensor
               device_class: power
+
+        surplus_sensor_inverted:
+          name: Surplus Sensor Sign Convention
+          description: >
+            How does your sensor report feed-in (power going to the grid)?
+            Positive (e.g. SMA, SolarEdge export sensors): value is > 0 when feeding to grid.
+            Negative (e.g. Huawei EMMA "Feed in power"): value is < 0 when feeding to grid.
+          default: false
+          selector:
+            boolean: {}
 
         battery_soc_sensor:
           name: Battery SOC Sensor
@@ -366,10 +375,13 @@ action:
       v_cutoff: !input thermostat_cutoff_threshold
       v_grid_sensor: !input grid_sensor
       v_max_grid_import: !input max_grid_import
+      v_invert_surplus: !input surplus_sensor_inverted
 
   # Block 2: Read current sensor values and evaluate operating conditions
   - variables:
-      effective_surplus: "{{ states(v_surplus_sensor) | float(0) }}"
+      effective_surplus: >-
+        {%- set raw = states(v_surplus_sensor) | float(0) -%}
+        {{ [raw * -1, 0] | max if v_invert_surplus else [raw, 0] | max }}
       battery_soc: "{{ states(v_battery_soc_sensor) | float(0) }}"
       sw1_on: "{{ is_state(v_switch_p1, 'on') }}"
       sw2_on: "{{ is_state(v_switch_p2, 'on') }}"
@@ -521,7 +533,9 @@ action:
               - delay: "00:15:00"
               # Re-read all sensors after the wait to get fresh desired stage
               - variables:
-                  retry_surplus: "{{ states(v_surplus_sensor) | float(0) }}"
+                  retry_surplus: >-
+                    {%- set raw = states(v_surplus_sensor) | float(0) -%}
+                    {{ [raw * -1, 0] | max if v_invert_surplus else [raw, 0] | max }}
                   retry_soc: "{{ states(v_battery_soc_sensor) | float(0) }}"
                   retry_in_window: >
                     {{ now().strftime('%H:%M:%S') >= v_start_time and
