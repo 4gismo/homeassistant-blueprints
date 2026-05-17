@@ -1,316 +1,819 @@
 
 blueprint:
-  name: PV Heating Rod Automation with Real Surplus Calculation
+  name: PV Heating Rod Automation
   description: |
-    Version 1.3.4
-    This automation controls up to three heating rods based on the *actual* PV surplus,
-    calculated as:
-    
-      PV Generation - Internal Consumption = Effective PV Surplus
+    Version 2.0
+    Controls up to three heating rods based on actual PV feed-in surplus.
+
+    Recommended sensor: EMMA "Feed in power" (what is currently going to the grid).
+    This ensures the battery always has priority — heating rods only run on true excess.
 
     Features:
-    - Safe switching with fixed 5-second delays between actions.
-    - Configurable lock time after switching (default 2 minutes).
-    - Automatic failsafe shutdown if outside time window or battery SOC is too low.
-    - Automatic stage logging with effective surplus value.
+    - Hysteresis: configurable deadband prevents oscillation around thresholds.
+      Stage switches UP at threshold, switches DOWN only at (threshold - hysteresis).
+    - Failsafe shutdown: explicit time trigger at end_time ensures immediate shutdown.
+      Also shuts down when battery SOC drops below the configured minimum.
+    - Correct switching sequence: always turn OFF first, then turn ON.
+      Prevents momentary power overshoot (e.g. 6 kW when targeting 4 kW).
+    - Notifications only on stage changes, not on every sensor update.
+    - Lock time respected via mode: single — new triggers are silently ignored
+      during the lock delay after a stage change.
+
+    Stage table (Heating Rod combinations):
+      Stage 0: Rod1=OFF Rod2=OFF Rod3=OFF  →  0 kW
+      Stage 1: Rod1=ON  Rod2=OFF Rod3=OFF  →  1 kW
+      Stage 2: Rod1=OFF Rod2=ON  Rod3=OFF  →  2 kW
+      Stage 3: Rod1=OFF Rod2=OFF Rod3=ON   →  3 kW
+      Stage 4: Rod1=ON  Rod2=OFF Rod3=ON   →  4 kW
+      Stage 5: Rod1=OFF Rod2=ON  Rod3=ON   →  5 kW
+      Stage 6: Rod1=ON  Rod2=ON  Rod3=ON   →  6 kW
+
+    Known limitations:
+    - Stage thresholds must be configured in ascending order (Stage 1 < Stage 2 < ... < Stage 6).
+      Inverted thresholds cause undefined stage behavior and are not validated at runtime.
+    - Overnight time windows (e.g. 23:00 to 01:00) are not supported.
+      For PV systems this is irrelevant as operation is always during daylight hours.
+    - When a surplus or battery sensor reports 'unavailable', the automation treats the value
+      as 0 W / 0 % respectively, which triggers a safe shutdown of all rods.
+    - The grid-import kill-switch cannot interrupt delays caused by mode: single.
+      Keep the lock time low (default 2 min) to minimise this window. For a guaranteed
+      real-time grid-import guard, add a separate automation outside this blueprint.
 
   domain: automation
   source_url: "https://raw.githubusercontent.com/4gismo/homeassistant-blueprints/main/automation/pv_heating_rod/blueprint.yaml"
 
   input:
-    pv_generation_sensor:
-      name: PV Generation Sensor
-      selector:
-        entity:
-          domain: sensor
-    internal_consumption_sensor:
-      name: Internal Consumption Sensor
-      selector:
-        entity:
-          domain: sensor
-    battery_soc_sensor:
-      name: Battery SOC Sensor
-      selector:
-        entity:
-          domain: sensor
-    battery_limit:
-      name: Minimum Battery SOC (%)
-      default: 60
-      selector:
-        number:
-          min: 0
-          max: 100
-          unit_of_measurement: "%"
-          step: 1
-    start_time:
-      name: Automation Start Time
-      default: "08:00:00"
-      selector:
-        time: {}
-    end_time:
-      name: Automation End Time
-      default: "18:00:00"
-      selector:
-        time: {}
-    lock_time_after_switching:
-      name: Lock Time After Switching (minutes)
-      default: 2
-      selector:
-        number:
-          min: 1
-          max: 30
-          unit_of_measurement: min
-          step: 1
+    sensors_section:
+      name: Sensors
+      input:
+        surplus_sensor:
+          name: PV Surplus Sensor
+          description: >
+            Sensor measuring current power going to the grid (feed-in power), in watts.
+            For Huawei systems: use EMMA "Feed in power".
+            This ensures battery has priority over heating rods.
+            If your inverter reports negative values for feed-in, create a template sensor first (see README).
+          selector:
+            entity:
+              domain: sensor
+              device_class: power
 
-    stage_1_threshold:
-      name: Minimum Effective PV Surplus for Stage 1 (1 kW total)
-      default: 1000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          step: 100
-          unit_of_measurement: W
-    stage_2_threshold:
-      name: Minimum Effective PV Surplus for Stage 2 (2 kW total)
-      default: 2000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          step: 100
-          unit_of_measurement: W
-    stage_3_threshold:
-      name: Minimum Effective PV Surplus for Stage 3 (3 kW total)
-      default: 3000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          step: 100
-          unit_of_measurement: W
-    stage_4_threshold:
-      name: Minimum Effective PV Surplus for Stage 4 (4 kW total)
-      default: 4000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          step: 100
-          unit_of_measurement: W
-    stage_5_threshold:
-      name: Minimum Effective PV Surplus for Stage 5 (5 kW total)
-      default: 5000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          step: 100
-          unit_of_measurement: W
-    stage_6_threshold:
-      name: Minimum Effective PV Surplus for Stage 6 (6 kW total)
-      default: 6000
-      selector:
-        number:
-          min: 0
-          max: 10000
-          step: 100
-          unit_of_measurement: W
-    switch_p1:
-      name: Switch for Heating Rod 1 (1 kW)
-      selector:
-        entity:
-          domain: switch
-    switch_p2:
-      name: Switch for Heating Rod 2 (2 kW)
-      selector:
-        entity:
-          domain: switch
-    switch_p3:
-      name: Switch for Heating Rod 3 (3 kW)
-      selector:
-        entity:
-          domain: switch
+        battery_soc_sensor:
+          name: Battery SOC Sensor
+          description: >
+            Sensor for battery state of capacity (0–100 %).
+            For Huawei systems: use EMMA "State of capacity".
+            When this sensor is unavailable, automation treats SOC as 0% and shuts down all rods (safe behavior).
+          selector:
+            entity:
+              domain: sensor
+              device_class: battery
+
+        grid_sensor:
+          name: Grid Power Sensor (optional but strongly recommended)
+          description: >
+            Measures current grid power flow. Convention: positive = importing from grid, negative = exporting.
+            For Huawei EMMA: use "Active power" sensor.
+            When configured, ALL heating rods are immediately shut down if grid import exceeds
+            the threshold below — regardless of lock delays, retry cycles, or any other state.
+            This is the most reliable safeguard against heating with grid power.
+            Leave empty to disable (not recommended).
+          default: {}
+          selector:
+            entity:
+              domain: sensor
+              device_class: power
+
+        max_grid_import:
+          name: Maximum Tolerated Grid Import (W)
+          description: >
+            Emergency shutdown triggers if grid import exceeds this value.
+            Set above your typical measurement noise (recommended: 100–200 W).
+            A value of 0 triggers on any measurable import.
+          default: 150
+          selector:
+            number:
+              min: 0
+              max: 2000
+              unit_of_measurement: W
+              step: 50
+
+    heating_rods_section:
+      name: Heating Rods
+      input:
+        switch_p1:
+          name: Switch for Heating Rod 1 (1 kW)
+          selector:
+            entity:
+              domain: switch
+
+        switch_p2:
+          name: Switch for Heating Rod 2 (2 kW)
+          selector:
+            entity:
+              domain: switch
+
+        switch_p3:
+          name: Switch for Heating Rod 3 (3 kW)
+          selector:
+            entity:
+              domain: switch
+
+    operation_section:
+      name: Operation Settings
+      input:
+        start_time:
+          name: Automation Start Time
+          default: "08:00:00"
+          selector:
+            time: {}
+
+        end_time:
+          name: Automation End Time
+          default: "18:00:00"
+          selector:
+            time: {}
+
+        battery_limit:
+          name: Minimum Battery SOC (%)
+          description: Heating rods are disabled when battery SOC drops below this value.
+          default: 60
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              step: 5
+
+        hysteresis_watts:
+          name: Hysteresis (W)
+          description: >
+            Surplus must drop this many watts below a stage threshold before switching down.
+            Example with default 200 W: Stage 1 activates at 1000 W, deactivates below 800 W.
+            Set to 0 to disable hysteresis.
+          default: 200
+          selector:
+            number:
+              min: 0
+              max: 500
+              unit_of_measurement: W
+              step: 50
+
+        lock_time_after_switching:
+          name: Lock Time After Switching (minutes)
+          description: >
+            After a stage change, new sensor triggers are ignored for this duration.
+            Prevents rapid switching on unstable surplus readings.
+            Keep low (1–5 min) — the grid-import safety shutdown cannot fire during a lock delay.
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 5
+              unit_of_measurement: min
+              step: 1
+
+    stage_thresholds_section:
+      name: Stage Thresholds
+      collapsed: true
+      input:
+        stage_1_threshold:
+          name: Stage 1 Threshold — Rod 1 only (1 kW total)
+          default: 1000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              step: 100
+              unit_of_measurement: W
+
+        stage_2_threshold:
+          name: Stage 2 Threshold — Rod 2 only (2 kW total)
+          default: 2000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              step: 100
+              unit_of_measurement: W
+
+        stage_3_threshold:
+          name: Stage 3 Threshold — Rod 3 only (3 kW total)
+          default: 3000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              step: 100
+              unit_of_measurement: W
+
+        stage_4_threshold:
+          name: Stage 4 Threshold — Rod 1 + Rod 3 (4 kW total)
+          default: 4000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              step: 100
+              unit_of_measurement: W
+
+        stage_5_threshold:
+          name: Stage 5 Threshold — Rod 2 + Rod 3 (5 kW total)
+          default: 5000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              step: 100
+              unit_of_measurement: W
+
+        stage_6_threshold:
+          name: Stage 6 Threshold — all rods (6 kW total)
+          default: 6000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              step: 100
+              unit_of_measurement: W
+
+    power_monitoring_section:
+      name: Power Monitoring (Optional)
+      collapsed: true
+      input:
+        switch_p1_power:
+          name: Power Sensor for Rod 1 (optional)
+          description: >
+            Power consumption sensor for heating rod 1 (e.g. Nous D3T power sensor).
+            When configured, the automation detects when the rod's internal thermostat
+            cuts out (buffer tank full) and retries after 15 minutes.
+            Leave empty if no power monitoring is available.
+          default: {}
+          selector:
+            entity:
+              domain: sensor
+              device_class: power
+
+        switch_p2_power:
+          name: Power Sensor for Rod 2 (optional)
+          description: Power consumption sensor for heating rod 2. Leave empty if not available.
+          default: {}
+          selector:
+            entity:
+              domain: sensor
+              device_class: power
+
+        switch_p3_power:
+          name: Power Sensor for Rod 3 (optional)
+          description: Power consumption sensor for heating rod 3. Leave empty if not available.
+          default: {}
+          selector:
+            entity:
+              domain: sensor
+              device_class: power
+
+        thermostat_cutoff_threshold:
+          name: Thermostat Cutoff Threshold (W)
+          description: >
+            A rod is considered thermostated off (buffer tank full) when its measured power
+            drops below this value. Default 50 W safely covers standby draw and measurement noise.
+            Only used when power sensors are configured above.
+          default: 50
+          selector:
+            number:
+              min: 0
+              max: 200
+              unit_of_measurement: W
+              step: 10
+
+    logging_section:
+      name: Logging
+      collapsed: true
+      input:
+        enable_logging:
+          name: Enable Logging
+          description: >
+            When enabled, stage changes are written to the Home Assistant Logbook (visible under History).
+            Failsafe shutdowns always create a persistent notification regardless of this setting.
+          default: true
+          selector:
+            boolean: {}
 
 trigger:
   - platform: state
-    entity_id: !input pv_generation_sensor
-  - platform: state
-    entity_id: !input internal_consumption_sensor
+    entity_id: !input surplus_sensor
   - platform: state
     entity_id: !input battery_soc_sensor
+  - platform: state
+    entity_id: !input grid_sensor
   - platform: time_pattern
     minutes: "/5"
-
-condition:
-  - condition: time
-    after: !input start_time
-    before: !input end_time
-  - condition: numeric_state
-    entity_id: !input battery_soc_sensor
-    above: !input battery_limit
+  - platform: time
+    at: !input end_time
+  - platform: time
+    at: !input start_time
+  # Power monitoring triggers
+  # below threshold for 2 min: sustained zero-draw — triggers buffer-full retry cycle check
+  # above threshold for 15 s: rod resumed heating — triggers resume log
+  - platform: numeric_state
+    entity_id: !input switch_p1_power
+    below: !input thermostat_cutoff_threshold
+    for: "00:02:00"
+  - platform: numeric_state
+    entity_id: !input switch_p1_power
+    above: !input thermostat_cutoff_threshold
+    for: "00:00:15"
+  - platform: numeric_state
+    entity_id: !input switch_p2_power
+    below: !input thermostat_cutoff_threshold
+    for: "00:02:00"
+  - platform: numeric_state
+    entity_id: !input switch_p2_power
+    above: !input thermostat_cutoff_threshold
+    for: "00:00:15"
+  - platform: numeric_state
+    entity_id: !input switch_p3_power
+    below: !input thermostat_cutoff_threshold
+    for: "00:02:00"
+  - platform: numeric_state
+    entity_id: !input switch_p3_power
+    above: !input thermostat_cutoff_threshold
+    for: "00:00:15"
 
 action:
+  # Block 1: Resolve all !input references into plain variables for use in templates
   - variables:
-      pv_generation: "{{ states(!input pv_generation_sensor) | float(0) }}"
-      internal_consumption: "{{ states(!input internal_consumption_sensor) | float(0) }}"
-      effective_surplus: "{{ pv_generation - internal_consumption }}"
+      v_surplus_sensor: !input surplus_sensor
+      v_battery_soc_sensor: !input battery_soc_sensor
+      v_battery_limit: !input battery_limit
+      v_start_time: !input start_time
+      v_end_time: !input end_time
+      v_hysteresis: !input hysteresis_watts
+      v_t1: !input stage_1_threshold
+      v_t2: !input stage_2_threshold
+      v_t3: !input stage_3_threshold
+      v_t4: !input stage_4_threshold
+      v_t5: !input stage_5_threshold
+      v_t6: !input stage_6_threshold
+      v_switch_p1: !input switch_p1
+      v_switch_p2: !input switch_p2
+      v_switch_p3: !input switch_p3
+      v_lock_time: !input lock_time_after_switching
+      v_logging: !input enable_logging
+      v_p1_power_sensor: !input switch_p1_power
+      v_p2_power_sensor: !input switch_p2_power
+      v_p3_power_sensor: !input switch_p3_power
+      v_cutoff: !input thermostat_cutoff_threshold
+      v_grid_sensor: !input grid_sensor
+      v_max_grid_import: !input max_grid_import
 
+  # Block 2: Read current sensor values and evaluate operating conditions
+  - variables:
+      effective_surplus: "{{ states(v_surplus_sensor) | float(0) }}"
+      battery_soc: "{{ states(v_battery_soc_sensor) | float(0) }}"
+      sw1_on: "{{ is_state(v_switch_p1, 'on') }}"
+      sw2_on: "{{ is_state(v_switch_p2, 'on') }}"
+      sw3_on: "{{ is_state(v_switch_p3, 'on') }}"
+      in_time_window: >
+        {{ now().strftime('%H:%M:%S') >= v_start_time and
+           now().strftime('%H:%M:%S') < v_end_time }}
+      battery_ok: "{{ battery_soc >= v_battery_limit | float }}"
+      # Power readings: -1 sentinel means sensor not configured
+      p1_power: "{{ states(v_p1_power_sensor) | float(-1) if v_p1_power_sensor else -1 }}"
+      p2_power: "{{ states(v_p2_power_sensor) | float(-1) if v_p2_power_sensor else -1 }}"
+      p3_power: "{{ states(v_p3_power_sensor) | float(-1) if v_p3_power_sensor else -1 }}"
+      # Thermostat detection: switch ON but power below cutoff threshold
+      p1_thermostated: "{{ sw1_on and p1_power >= 0 and p1_power < v_cutoff }}"
+      p2_thermostated: "{{ sw2_on and p2_power >= 0 and p2_power < v_cutoff }}"
+      p3_thermostated: "{{ sw3_on and p3_power >= 0 and p3_power < v_cutoff }}"
+      # True only when this run was triggered by a power sensor crossing the threshold
+      trigger_is_power_sensor: >
+        {{ trigger.platform == 'numeric_state' and
+           trigger.entity_id in [v_p1_power_sensor, v_p2_power_sensor, v_p3_power_sensor] }}
 
-  - choose:
-      - conditions:
-          - condition: or
-            conditions:
-              - condition: not
-                conditions:
-                  - condition: time
-                    after: !input start_time
-                    before: !input end_time
-              - condition: not
-                conditions:
-                  - condition: numeric_state
-                    entity_id: !input battery_soc_sensor
-                    above: !input battery_limit
-        sequence:
-          - service: switch.turn_off
+  # Block 2.1: Read grid sensor value (separate block so grid_import_detected can reference it)
+  - variables:
+      grid_power: "{{ states(v_grid_sensor) | float(0) if v_grid_sensor and states(v_grid_sensor) not in ['unavailable', 'unknown'] else -9999 }}"
+
+  # Block 2.2: Evaluate safety conditions (grid_power resolved from previous block)
+  - variables:
+      grid_import_detected: "{{ v_grid_sensor and grid_power != -9999 and grid_power > v_max_grid_import }}"
+      surplus_sensor_invalid: "{{ states(v_surplus_sensor) in ['unavailable', 'unknown'] }}"
+      any_rod_on: "{{ sw1_on or sw2_on or sw3_on }}"
+
+  # Block 2.3: Emergency safety shutdown — runs before any stage logic
+  - if:
+      - condition: template
+        value_template: "{{ grid_import_detected or (surplus_sensor_invalid and any_rod_on) }}"
+    then:
+      - action: switch.turn_off
+        target:
+          entity_id:
+            - "{{ v_switch_p1 }}"
+            - "{{ v_switch_p2 }}"
+            - "{{ v_switch_p3 }}"
+      - action: persistent_notification.create
+        data:
+          title: "PV Heating Rod — EMERGENCY SHUTDOWN"
+          message: >
+            {% if grid_import_detected %}
+            Grid import detected: {{ grid_power | round(0) }} W
+            (threshold: {{ v_max_grid_import }} W).
+            {% else %}
+            Surplus sensor is {{ states(v_surplus_sensor) }} — cannot verify safe conditions.
+            {% endif %}
+            All rods turned off immediately to prevent heating with grid power.
+            (trigger: {{ trigger.platform }})
+      - stop: "Emergency safety shutdown — grid import or invalid surplus sensor"
+
+  # Block 2.5: Combined monitoring state (depends on Block 2 thermostat variables)
+  - variables:
+      # True if at least one ON rod has a configured power sensor
+      any_on_monitored: >
+        {{ (sw1_on and v_p1_power_sensor) or
+           (sw2_on and v_p2_power_sensor) or
+           (sw3_on and v_p3_power_sensor) }}
+      # True if every ON rod that has a power sensor is currently thermostated
+      all_on_monitored_thermostated: >
+        {{ any_on_monitored and
+           (not sw1_on or not v_p1_power_sensor or p1_thermostated) and
+           (not sw2_on or not v_p2_power_sensor or p2_thermostated) and
+           (not sw3_on or not v_p3_power_sensor or p3_thermostated) }}
+
+  # Block 3: Derive current stage from switch states (returns clean integer, no whitespace)
+  - variables:
+      current_stage: >-
+        {%- if sw1_on and sw2_on and sw3_on -%}6
+        {%- elif not sw1_on and sw2_on and sw3_on -%}5
+        {%- elif sw1_on and not sw2_on and sw3_on -%}4
+        {%- elif not sw1_on and not sw2_on and sw3_on -%}3
+        {%- elif not sw1_on and sw2_on and not sw3_on -%}2
+        {%- elif sw1_on and not sw2_on and not sw3_on -%}1
+        {%- else -%}0
+        {%- endif -%}
+
+  # Block 4: Calculate raw desired stage without hysteresis
+  - variables:
+      raw_desired_stage: >-
+        {%- set s = effective_surplus -%}
+        {%- if s >= v_t6 -%}6
+        {%- elif s >= v_t5 -%}5
+        {%- elif s >= v_t4 -%}4
+        {%- elif s >= v_t3 -%}3
+        {%- elif s >= v_t2 -%}2
+        {%- elif s >= v_t1 -%}1
+        {%- else -%}0
+        {%- endif -%}
+
+  # Block 5: Apply hysteresis — only step DOWN if surplus dropped below (threshold - hysteresis)
+  - variables:
+      desired_stage: >-
+        {%- set raw = raw_desired_stage | int -%}
+        {%- set cur = current_stage | int -%}
+        {%- set s = effective_surplus -%}
+        {%- set h = v_hysteresis -%}
+        {%- if raw > cur -%}
+          {{- raw -}}
+        {%- elif raw < cur -%}
+          {%- set thresholds = [0, v_t1, v_t2, v_t3, v_t4, v_t5, v_t6] -%}
+          {%- if s < thresholds[cur] - h -%}
+            {{- raw -}}
+          {%- else -%}
+            {{- cur -}}
+          {%- endif -%}
+        {%- else -%}
+          {{- cur -}}
+        {%- endif -%}
+
+  # Power monitoring: buffer tank management with auto-retry cycle
+  - if:
+      - condition: template
+        value_template: "{{ trigger_is_power_sensor }}"
+    then:
+      - choose:
+          # --- CASE 1: all monitored ON rods below threshold for 2+ min → buffer full ---
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ trigger.to_state.state | float(999) < v_cutoff and
+                     all_on_monitored_thermostated }}
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ v_logging }}"
+                then:
+                  - action: logbook.log
+                    data:
+                      name: "PV Heating Rod — Buffer Tank"
+                      message: >
+                        All active rods have drawn no current for 2+ minutes — buffer tank full.
+                        Turning off all rods. Retry in 15 minutes.
+                      entity_id: "{{ v_switch_p1 }}"
+                      domain: automation
+              # Turn all active switches off
+              - action: switch.turn_off
+                target:
+                  entity_id:
+                    - "{{ v_switch_p1 }}"
+                    - "{{ v_switch_p2 }}"
+                    - "{{ v_switch_p3 }}"
+              # Wait before retrying
+              - delay: "00:15:00"
+              # Re-read all sensors after the wait to get fresh desired stage
+              - variables:
+                  retry_surplus: "{{ states(v_surplus_sensor) | float(0) }}"
+                  retry_soc: "{{ states(v_battery_soc_sensor) | float(0) }}"
+                  retry_in_window: >
+                    {{ now().strftime('%H:%M:%S') >= v_start_time and
+                       now().strftime('%H:%M:%S') < v_end_time }}
+                  retry_battery_ok: "{{ retry_soc >= v_battery_limit | float }}"
+                  retry_desired_stage: >-
+                    {%- set s = retry_surplus -%}
+                    {%- if not retry_in_window or not retry_battery_ok -%}0
+                    {%- elif s >= v_t6 -%}6
+                    {%- elif s >= v_t5 -%}5
+                    {%- elif s >= v_t4 -%}4
+                    {%- elif s >= v_t3 -%}3
+                    {%- elif s >= v_t2 -%}2
+                    {%- elif s >= v_t1 -%}1
+                    {%- else -%}0
+                    {%- endif -%}
+                  retry_target_p1: "{{ retry_desired_stage | int in [1, 4, 6] }}"
+                  retry_target_p2: "{{ retry_desired_stage | int in [2, 5, 6] }}"
+                  retry_target_p3: "{{ retry_desired_stage | int in [3, 4, 5, 6] }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ retry_desired_stage | int > 0 }}"
+                then:
+                  # Turn on at the current desired stage (off-first not needed — all were off)
+                  - if:
+                      - condition: template
+                        value_template: "{{ retry_target_p1 }}"
+                    then:
+                      - action: switch.turn_on
+                        target:
+                          entity_id: "{{ v_switch_p1 }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ retry_target_p2 }}"
+                    then:
+                      - action: switch.turn_on
+                        target:
+                          entity_id: "{{ v_switch_p2 }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ retry_target_p3 }}"
+                    then:
+                      - action: switch.turn_on
+                        target:
+                          entity_id: "{{ v_switch_p3 }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ v_logging }}"
+                    then:
+                      - action: logbook.log
+                        data:
+                          name: "PV Heating Rod — Buffer Tank"
+                          message: >
+                            Retry: Stage {{ retry_desired_stage }} turned on
+                            (surplus: {{ retry_surplus | round(0) }} W).
+                            Checking in 2 minutes whether rods are heating.
+                          entity_id: "{{ v_switch_p1 }}"
+                          domain: automation
+                  # Wait to observe whether rods actually draw power
+                  - delay: "00:02:00"
+                  # Re-read power sensors to evaluate retry result
+                  - variables:
+                      chk_p1: "{{ states(v_p1_power_sensor) | float(-1) if retry_target_p1 and v_p1_power_sensor else -1 }}"
+                      chk_p2: "{{ states(v_p2_power_sensor) | float(-1) if retry_target_p2 and v_p2_power_sensor else -1 }}"
+                      chk_p3: "{{ states(v_p3_power_sensor) | float(-1) if retry_target_p3 and v_p3_power_sensor else -1 }}"
+                      # At least one retried rod must be above cutoff to count as heating
+                      retry_heating: >
+                        {{ (retry_target_p1 and v_p1_power_sensor and chk_p1 >= v_cutoff) or
+                           (retry_target_p2 and v_p2_power_sensor and chk_p2 >= v_cutoff) or
+                           (retry_target_p3 and v_p3_power_sensor and chk_p3 >= v_cutoff) }}
+                  - if:
+                      - condition: template
+                        value_template: "{{ retry_heating }}"
+                    then:
+                      # Success: buffer is cooling, heating resumed normally
+                      - if:
+                          - condition: template
+                            value_template: "{{ v_logging }}"
+                        then:
+                          - action: logbook.log
+                            data:
+                              name: "PV Heating Rod — Buffer Tank"
+                              message: >
+                                Retry successful — buffer tank cooling, heating resumed at
+                                Stage {{ retry_desired_stage }}
+                                (Rod 1: {{ chk_p1 | round(0) if chk_p1 >= 0 else 'no sensor' }} W,
+                                 Rod 2: {{ chk_p2 | round(0) if chk_p2 >= 0 else 'no sensor' }} W,
+                                 Rod 3: {{ chk_p3 | round(0) if chk_p3 >= 0 else 'no sensor' }} W).
+                              entity_id: "{{ v_switch_p1 }}"
+                              domain: automation
+                    else:
+                      # Failed: buffer still full — turn off only the rods that were turned on for retry
+                      - if:
+                          - condition: template
+                            value_template: "{{ retry_target_p1 }}"
+                        then:
+                          - action: switch.turn_off
+                            target:
+                              entity_id: "{{ v_switch_p1 }}"
+                      - if:
+                          - condition: template
+                            value_template: "{{ retry_target_p2 }}"
+                        then:
+                          - action: switch.turn_off
+                            target:
+                              entity_id: "{{ v_switch_p2 }}"
+                      - if:
+                          - condition: template
+                            value_template: "{{ retry_target_p3 }}"
+                        then:
+                          - action: switch.turn_off
+                            target:
+                              entity_id: "{{ v_switch_p3 }}"
+                      - if:
+                          - condition: template
+                            value_template: "{{ v_logging }}"
+                        then:
+                          - action: logbook.log
+                            data:
+                              name: "PV Heating Rod — Buffer Tank"
+                              message: >
+                                Retry failed — buffer still full
+                                (Rod 1: {{ chk_p1 | round(0) if chk_p1 >= 0 else 'no sensor' }} W,
+                                 Rod 2: {{ chk_p2 | round(0) if chk_p2 >= 0 else 'no sensor' }} W,
+                                 Rod 3: {{ chk_p3 | round(0) if chk_p3 >= 0 else 'no sensor' }} W).
+                                Next retry starts automatically when rod power stays below
+                                {{ v_cutoff }} W for 2 minutes.
+                              entity_id: "{{ v_switch_p1 }}"
+                              domain: automation
+                else:
+                  # No surplus / outside window after 15 min: stay off, log reason
+                  - if:
+                      - condition: template
+                        value_template: "{{ v_logging }}"
+                    then:
+                      - action: logbook.log
+                        data:
+                          name: "PV Heating Rod — Buffer Tank"
+                          message: >
+                            Retry skipped after 15 min wait:
+                            {{ 'outside time window' if not retry_in_window
+                               else 'battery SOC too low (' ~ (retry_soc | round(1)) ~ '%)'
+                               if not retry_battery_ok
+                               else 'no PV surplus (' ~ (retry_surplus | round(0)) ~ ' W)' }}.
+                            Rods stay off.
+                          entity_id: "{{ v_switch_p1 }}"
+                          domain: automation
+              - stop: "Buffer tank retry cycle complete"
+
+          # --- CASE 2: single rod thermostated (not all) — just log ---
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ v_logging and
+                     trigger.to_state.state | float(999) < v_cutoff and
+                     not all_on_monitored_thermostated }}
+            sequence:
+              - action: logbook.log
+                data:
+                  name: "PV Heating Rod — Buffer Tank"
+                  message: >
+                    {% set rod_name = 'Rod 1' if trigger.entity_id == v_p1_power_sensor
+                                      else ('Rod 2' if trigger.entity_id == v_p2_power_sensor
+                                      else 'Rod 3') %}
+                    {{ rod_name }}: thermostat cut out
+                    ({{ trigger.to_state.state | float(0) | round(0) }} W).
+                    Other rods still active — buffer not yet full.
+                  entity_id: "{{ trigger.entity_id }}"
+                  domain: automation
+
+        # --- DEFAULT: power sensor above threshold — rod resumed heating ---
+        default:
+          - if:
+              - condition: template
+                value_template: "{{ v_logging }}"
+            then:
+              - action: logbook.log
+                data:
+                  name: "PV Heating Rod — Buffer Tank"
+                  message: >
+                    {% set rod_name = 'Rod 1' if trigger.entity_id == v_p1_power_sensor
+                                      else ('Rod 2' if trigger.entity_id == v_p2_power_sensor
+                                      else 'Rod 3') %}
+                    {{ rod_name }}: resumed heating
+                    ({{ trigger.to_state.state | float(0) | round(0) }} W) —
+                    buffer tank cooling down.
+                  entity_id: "{{ trigger.entity_id }}"
+                  domain: automation
+
+  # Main logic: failsafe shutdown or normal stage control
+  - if:
+      - condition: template
+        value_template: "{{ not (in_time_window and battery_ok) }}"
+    then:
+      # FAILSAFE: outside time window or battery SOC too low — shut everything down.
+      # Check actual switch states, not derived current_stage, to catch any invalid switch combination.
+      - if:
+          - condition: template
+            value_template: "{{ sw1_on or sw2_on or sw3_on }}"
+        then:
+          - action: switch.turn_off
             target:
               entity_id:
-                - !input switch_p1
-                - !input switch_p2
-                - !input switch_p3
-
-  - choose:
-
-      - conditions:
-          - condition: template
-            value_template: "{{ effective_surplus > !input stage_6_threshold }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p1
-          - delay: "00:00:05"
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p2
-          - delay: "00:00:05"
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p3
-          - service: persistent_notification.create
+                - "{{ v_switch_p1 }}"
+                - "{{ v_switch_p2 }}"
+                - "{{ v_switch_p3 }}"
+          - action: persistent_notification.create
             data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 6 active. Effective surplus: {{ effective_surplus }} W"
-
-      - conditions:
+              title: "PV Heating Rod — Failsafe"
+              message: >
+                All rods OFF.
+                Reason: {{ 'outside time window' if not in_time_window else 'battery SOC too low (' ~ (battery_soc | round(1)) ~ '%)' }}.
+                Surplus: {{ effective_surplus | round(0) }} W (trigger: {{ trigger.platform }})
+    else:
+      # NORMAL OPERATION: only act when stage needs to change
+      - if:
           - condition: template
-            value_template: "{{ effective_surplus > !input stage_5_threshold }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p2
-          - delay: "00:00:05"
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p3
-          - delay: "00:00:05"
-          - service: switch.turn_off
-            target:
-              entity_id: !input switch_p1
-          - service: persistent_notification.create
-            data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 5 active. Effective surplus: {{ effective_surplus }} W"
+            value_template: "{{ desired_stage | int != current_stage | int }}"
+        then:
+          # Determine target switch states for the desired stage
+          - variables:
+              target_p1: "{{ desired_stage | int in [1, 4, 6] }}"
+              target_p2: "{{ desired_stage | int in [2, 5, 6] }}"
+              target_p3: "{{ desired_stage | int in [3, 4, 5, 6] }}"
 
-      - conditions:
-          - condition: template
-            value_template: "{{ effective_surplus > !input stage_4_threshold }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p1
+          # Step 1: Turn OFF switches that need to go off first (prevents momentary overshoot)
+          - if:
+              - condition: template
+                value_template: "{{ sw1_on and not target_p1 }}"
+            then:
+              - action: switch.turn_off
+                target:
+                  entity_id: "{{ v_switch_p1 }}"
+          - if:
+              - condition: template
+                value_template: "{{ sw2_on and not target_p2 }}"
+            then:
+              - action: switch.turn_off
+                target:
+                  entity_id: "{{ v_switch_p2 }}"
+          - if:
+              - condition: template
+                value_template: "{{ sw3_on and not target_p3 }}"
+            then:
+              - action: switch.turn_off
+                target:
+                  entity_id: "{{ v_switch_p3 }}"
+
+          # Step 2: Safety delay between switching off and on
           - delay: "00:00:05"
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p3
-          - delay: "00:00:05"
-          - service: switch.turn_off
-            target:
-              entity_id: !input switch_p2
-          - service: persistent_notification.create
-            data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 4 active. Effective surplus: {{ effective_surplus }} W"
 
-      - conditions:
-          - condition: template
-            value_template: "{{ effective_surplus > !input stage_3_threshold }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p3
-          - delay: "00:00:05"
-          - service: switch.turn_off
-            target:
-              entity_id:
-                - !input switch_p1
-                - !input switch_p2
-          - service: persistent_notification.create
-            data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 3 active. Effective surplus: {{ effective_surplus }} W"
+          # Step 3: Turn ON switches that need to go on
+          - if:
+              - condition: template
+                value_template: "{{ not sw1_on and target_p1 }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: "{{ v_switch_p1 }}"
+          - if:
+              - condition: template
+                value_template: "{{ not sw2_on and target_p2 }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: "{{ v_switch_p2 }}"
+          - if:
+              - condition: template
+                value_template: "{{ not sw3_on and target_p3 }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: "{{ v_switch_p3 }}"
 
-      - conditions:
-          - condition: template
-            value_template: "{{ effective_surplus > !input stage_2_threshold }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p2
-          - delay: "00:00:05"
-          - service: switch.turn_off
-            target:
-              entity_id:
-                - !input switch_p1
-                - !input switch_p3
-          - service: persistent_notification.create
-            data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 2 active. Effective surplus: {{ effective_surplus }} W"
+          # Step 4: Write stage change to Logbook (if logging enabled)
+          - if:
+              - condition: template
+                value_template: "{{ v_logging }}"
+            then:
+              - action: logbook.log
+                data:
+                  name: "PV Heating Rod"
+                  message: >
+                    Stage {{ desired_stage }} active (was {{ current_stage }}).
+                    Surplus: {{ effective_surplus | round(0) }} W, Battery: {{ battery_soc | round(1) }}%
+                    (trigger: {{ trigger.platform }})
+                  entity_id: "{{ v_switch_p1 }}"
+                  domain: automation
 
-      - conditions:
-          - condition: template
-            value_template: "{{ effective_surplus > !input stage_1_threshold }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input switch_p1
-          - delay: "00:00:05"
-          - service: switch.turn_off
-            target:
-              entity_id:
-                - !input switch_p2
-                - !input switch_p3
-          - service: persistent_notification.create
-            data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 1 active. Effective surplus: {{ effective_surplus }} W"
+          # Step 5: Lock time — silently ignore new triggers for configured duration
+          - delay:
+              minutes: "{{ v_lock_time }}"
 
-      - conditions:
-          - condition: template
-            value_template: "{{ effective_surplus <= !input stage_1_threshold }}"
-        sequence:
-          - service: switch.turn_off
-            target:
-              entity_id:
-                - !input switch_p1
-                - !input switch_p2
-                - !input switch_p3
-          - service: persistent_notification.create
-            data:
-              title: "PV Heating Rod Automation"
-              message: "Stage 0 active. All heating rods OFF. Effective surplus: {{ effective_surplus }} W"
-
-  - delay:
-      minutes: !input lock_time_after_switching
-
-mode: restart
+mode: single
+max_exceeded: silent
