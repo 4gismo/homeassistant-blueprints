@@ -2,18 +2,21 @@
 blueprint:
   name: PV Heating Rod Automation
   description: |
-    Version 2.2
+    Version 2.3
     Controls up to three heating rods based on actual PV feed-in surplus.
 
     Recommended sensor: EMMA "Feed in power" (what is currently going to the grid).
     This ensures the battery always has priority — heating rods only run on true excess.
 
     Features:
+    - Asymmetric switching: stages up immediately on surplus, down only on the 5-min
+      periodic check. Battery absorbs brief surplus dips (cloud shadows) without
+      switching rods off — e.g. 100% → 96% SOC is fine, no grid power consumed.
     - Hysteresis: configurable deadband prevents oscillation around thresholds.
       Stage switches UP at threshold, switches DOWN only at (threshold - hysteresis).
     - Failsafe shutdown: explicit time trigger at end_time ensures immediate shutdown.
       Also shuts down when battery SOC drops below the configured minimum.
-    - Correct switching sequence: always turn OFF first, then turn ON.
+    - Correct switching sequence: always turn OFF first, then ON.
       Prevents momentary power overshoot (e.g. 6 kW when targeting 4 kW).
     - Notifications only on stage changes, not on every sensor update.
     - Lock time respected via mode: single — new triggers are silently ignored
@@ -35,9 +38,11 @@ blueprint:
       For PV systems this is irrelevant as operation is always during daylight hours.
     - When a surplus or battery sensor reports 'unavailable', the automation treats the value
       as 0 W / 0 % respectively, which triggers a safe shutdown of all rods.
-    - The grid-import kill-switch cannot interrupt delays caused by mode: single.
+    - The grid-import kill-switch cannot interrupt an active lock delay caused by mode: single.
       Keep the lock time low (default 2 min) to minimise this window. For a guaranteed
       real-time grid-import guard, add a separate automation outside this blueprint.
+    - Stage-down decisions are delayed up to 5 minutes (periodic check). During a cloud,
+      the battery compensates the shortfall. This is intentional — see Asymmetric Switching.
 
   domain: automation
   source_url: "https://raw.githubusercontent.com/4gismo/homeassistant-blueprints/main/automation/pv_heating_rod/blueprint.yaml"
@@ -311,16 +316,24 @@ blueprint:
 trigger:
   - platform: state
     entity_id: !input surplus_sensor
+    id: "sensor"
   - platform: state
     entity_id: !input battery_soc_sensor
-  - platform: state
+    id: "sensor"
+  # Grid sensor: fires only when import crosses the emergency threshold (not on every update)
+  - platform: numeric_state
     entity_id: !input grid_sensor
+    above: !input max_grid_import
+    id: "grid_import"
   - platform: time_pattern
     minutes: "/5"
+    id: "periodic"
   - platform: time
     at: !input end_time
+    id: "boundary"
   - platform: time
     at: !input start_time
+    id: "boundary"
   # Power monitoring triggers
   # below threshold for 2 min: sustained zero-draw — triggers buffer-full retry cycle check
   # above threshold for 15 s: rod resumed heating — triggers resume log
@@ -328,26 +341,32 @@ trigger:
     entity_id: !input switch_p1_power
     below: !input thermostat_cutoff_threshold
     for: "00:02:00"
+    id: "power_monitor"
   - platform: numeric_state
     entity_id: !input switch_p1_power
     above: !input thermostat_cutoff_threshold
     for: "00:00:15"
+    id: "power_monitor"
   - platform: numeric_state
     entity_id: !input switch_p2_power
     below: !input thermostat_cutoff_threshold
     for: "00:02:00"
+    id: "power_monitor"
   - platform: numeric_state
     entity_id: !input switch_p2_power
     above: !input thermostat_cutoff_threshold
     for: "00:00:15"
+    id: "power_monitor"
   - platform: numeric_state
     entity_id: !input switch_p3_power
     below: !input thermostat_cutoff_threshold
     for: "00:02:00"
+    id: "power_monitor"
   - platform: numeric_state
     entity_id: !input switch_p3_power
     above: !input thermostat_cutoff_threshold
     for: "00:00:15"
+    id: "power_monitor"
 
 action:
   # Block 1: Resolve all !input references into plain variables for use in templates
@@ -402,6 +421,13 @@ action:
       trigger_is_power_sensor: >
         {{ trigger.platform == 'numeric_state' and
            trigger.entity_id in [v_p1_power_sensor, v_p2_power_sensor, v_p3_power_sensor] }}
+      # True when this trigger is allowed to switch stages DOWN.
+      # Sensor triggers may only switch UP when battery is ≥ 90% — at that point the
+      # battery is essentially full and can absorb brief cloud dips without conflicting
+      # with the goal of ending the day with a full battery.
+      # Below 90%, stage-down is immediate so the battery keeps charging.
+      trigger_allows_stage_down: >
+        {{ trigger.id | default('') not in ['sensor'] or battery_soc < 90 }}
 
   # Block 2.1: Read grid sensor value (separate block so grid_import_detected can reference it)
   - variables:
@@ -751,6 +777,17 @@ action:
                 Surplus: {{ effective_surplus | round(0) }} W (trigger: {{ trigger.platform }})
     else:
       # NORMAL OPERATION: only act when stage needs to change
+
+      # Asymmetric switching: sensor triggers (surplus/battery) may only switch UP.
+      # If surplus drops briefly (cloud shadow), the battery compensates automatically.
+      # Stage-down happens at most 5 minutes later on the periodic check.
+      - if:
+          - condition: template
+            value_template: >
+              {{ desired_stage | int < current_stage | int and not trigger_allows_stage_down }}
+        then:
+          - stop: "Surplus dip — battery buffers, stage-down deferred to periodic check"
+
       - if:
           - condition: template
             value_template: "{{ desired_stage | int != current_stage | int }}"

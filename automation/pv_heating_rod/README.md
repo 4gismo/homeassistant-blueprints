@@ -1,7 +1,7 @@
 
 # PV Heating Rod Automation Blueprint for Home Assistant
 
-Controls up to three heating rods based on PV feed-in surplus and battery state of charge.
+Version 2.3 — Controls up to three heating rods based on PV feed-in surplus and battery state of charge.
 
 ---
 
@@ -16,6 +16,7 @@ This automation switches heating rods according to a **stage-based control logic
 ## Features
 
 - **Stage-based control**: 7 stages (0–6 kW) map to combinations of three rods (1/2/3 kW)
+- **Asymmetric switching**: stages up immediately on surplus, down only on the 5-min periodic check — battery absorbs cloud shadows without unnecessary rod switching
 - **Hysteresis**: configurable deadband prevents oscillation around thresholds
 - **Failsafe shutdown**: explicit time trigger at `end_time` + battery SOC guard
 - **Correct switching sequence**: always turns OFF first, then ON — prevents momentary power overshoot
@@ -23,6 +24,32 @@ This automation switches heating rods according to a **stage-based control logic
 - **Grid-import kill-switch**: emergency shutdown if grid import exceeds a threshold
 - **Buffer tank detection**: detects when the thermostat cuts out (no power draw) and retries after 15 minutes
 - **Logbook integration**: stage changes and buffer tank events written to HA History
+
+---
+
+## Execution Flow
+
+Each time the automation runs, it works through four priority levels in order:
+
+```
+1. EMERGENCY SHUTDOWN (highest priority)
+   Grid import > threshold OR surplus sensor unavailable
+   → All rods OFF immediately, persistent notification, stop.
+
+2. FAILSAFE SHUTDOWN
+   Outside time window OR battery SOC < minimum
+   → All rods OFF, persistent notification, stop.
+
+3. BUFFER TANK (only when triggered by a power sensor)
+   All active rods draw no current for 2 min → buffer tank full
+   → All rods OFF, wait 15 min, retry, stop.
+
+4. NORMAL STAGE CONTROL
+   Asymmetric switching:
+   → Stage UP:   immediately on any trigger
+   → Stage DOWN: only on 5-min periodic check AND battery SOC < 90 %
+                 (below 90 %: stage-down is immediate so battery keeps charging)
+```
 
 ---
 
@@ -54,6 +81,38 @@ To prevent rapid switching when the surplus oscillates around a threshold, the b
 | Surplus rises | 1050 W | → Stage 1 ON (≥ 1000 W) |
 | Small drop | 950 W | → stays Stage 1 (≥ 800 W, within hysteresis) |
 | Surplus falls | 780 W | → Stage 0 OFF (< 800 W = 1000 − 200) |
+
+---
+
+## Asymmetric Switching (Battery Buffering)
+
+Stage changes are intentionally asymmetric:
+
+- **Switching UP**: as soon as the surplus sensor reaches a threshold — immediate response.
+- **Switching DOWN**: only on the 5-minute periodic check, not on every sensor update.
+
+**Why**: When a cloud passes, the surplus sensor dips briefly while the battery automatically
+compensates (e.g. drops from 100 % to 96 % SOC — no grid power is drawn). Switching rods
+off and immediately back on wastes switching cycles and misses heating potential.
+
+With this behaviour, rods keep running through short cloud shadows. Only a sustained
+deficit (persisting until the next 5-minute check) triggers a stage-down.
+
+| Event | Battery SOC | Action |
+|-------|-------------|--------|
+| Surplus rises above threshold | any | Stage UP immediately |
+| Brief cloud dip (< 5 min) | ≥ 90% | Skipped — battery buffers |
+| Brief cloud dip (< 5 min) | < 90% | Stage DOWN immediately — battery keeps charging |
+| Sustained low surplus (> 5 min) | any | Stage DOWN on periodic check |
+| Grid import detected | any | All rods OFF immediately |
+| Outside time window / low SOC | any | All rods OFF immediately |
+
+**Why 90%**: below 90% SOC the battery is still charging. Letting it buffer heating rod
+load would conflict with the goal of ending the day with a full battery. Above 90% the
+battery is essentially full — a brief dip costs little and recharges quickly.
+
+The emergency shutdown (grid import) and failsafe (end_time, low battery SOC) always
+react immediately — the delay applies only to normal stage-down decisions.
 
 ---
 
@@ -260,7 +319,8 @@ Major changes in v2.0:
 
 - Overnight time windows (e.g. 23:00 to 01:00) are not supported
 - Stage thresholds must be in ascending order — not validated at runtime
-- The grid-import kill-switch cannot interrupt active lock delays (see Safety section)
+- The grid-import kill-switch cannot interrupt an active lock delay (see Safety section)
+- Stage-down decisions are delayed up to 5 minutes (periodic check) — intentional, see Asymmetric Switching
 
 ---
 
