@@ -2,7 +2,7 @@
 blueprint:
   name: PV Heating Rod Automation
   description: |
-    Version 2.1
+    Version 2.2
     Controls up to three heating rods based on actual PV feed-in surplus.
 
     Recommended sensor: EMMA "Feed in power" (what is currently going to the grid).
@@ -413,10 +413,10 @@ action:
       surplus_sensor_invalid: "{{ states(v_surplus_sensor) in ['unavailable', 'unknown'] }}"
       any_rod_on: "{{ sw1_on or sw2_on or sw3_on }}"
 
-  # Block 2.3: Emergency safety shutdown — runs before any stage logic
+  # Block 2.3: Emergency safety shutdown — only acts when at least one rod is on
   - if:
       - condition: template
-        value_template: "{{ grid_import_detected or (surplus_sensor_invalid and any_rod_on) }}"
+        value_template: "{{ any_rod_on and (grid_import_detected or surplus_sensor_invalid) }}"
     then:
       - action: switch.turn_off
         target:
