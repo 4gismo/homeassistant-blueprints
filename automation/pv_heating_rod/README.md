@@ -1,29 +1,40 @@
 
 # PV Heating Rod Automation Blueprint for Home Assistant
 
-Version 2.3 — Controls up to three heating rods based on PV feed-in surplus and battery state of charge.
+Version 3.0 — Controls up to three heating rods based on PV feed-in surplus and battery state of charge.
 
 ---
 
 ## About This Blueprint
 
-This automation switches heating rods according to a **stage-based control logic**, where each stage activates a specific combination of heating rods to match the available PV surplus as closely as possible in 1 kW steps.
+This automation switches heating rods according to a **stage-based control logic**. Each stage activates
+a specific combination of heating rods to match the available PV surplus as closely as possible.
 
-**Surplus source**: The blueprint uses a direct grid feed-in sensor rather than calculating PV minus consumption. This ensures the battery always has priority — heating rods only consume power that is actually going to the grid.
+Stage thresholds are **calculated automatically** from the configured rod capacities — no manual threshold
+tuning required. Equal-capacity rods are handled correctly: three 2 kW rods produce three clean stages
+(2 / 4 / 6 kW) instead of six partially overlapping ones.
+
+**Surplus source**: The blueprint uses a direct grid feed-in sensor rather than calculating PV minus
+consumption. This ensures the battery always has priority — heating rods only consume power that is
+actually going to the grid.
 
 ---
 
 ## Features
 
-- **Stage-based control**: 7 stages (0–6 kW) map to combinations of three rods (1/2/3 kW)
-- **Asymmetric switching**: stages up immediately on surplus, down only on the 5-min periodic check — battery absorbs cloud shadows without unnecessary rod switching
-- **Hysteresis**: configurable deadband prevents oscillation around thresholds
-- **Failsafe shutdown**: explicit time trigger at `end_time` + battery SOC guard
-- **Correct switching sequence**: always turns OFF first, then ON — prevents momentary power overshoot
-- **Lock time**: ignores new triggers for a configurable duration after each stage change
-- **Grid-import kill-switch**: emergency shutdown if grid import exceeds a threshold
-- **Buffer tank detection**: detects when the thermostat cuts out (no power draw) and retries after 15 minutes
-- **Logbook integration**: stage changes and buffer tank events written to HA History
+- **Dynamic stage table**: derived from rod capacities (kW each) — not manual thresholds.
+  Equal-power combinations are automatically merged; fewest rods wins (see Stage Table below).
+- **1–3 rods supported**: Rod 2 and Rod 3 are optional — leave their switch empty to disable.
+- **Battery capacity (kWh)**: configurable for informational display in log messages alongside SOC%.
+- **Asymmetric switching**: stages up immediately on surplus; stage-down suppressed when SOC ≥ 90%
+  and stage > Stage 1 — battery absorbs cloud shadows without unnecessary rod switching.
+- **Hysteresis**: configurable deadband prevents oscillation around thresholds.
+- **Failsafe shutdown**: explicit time trigger at `end_time` + battery SOC guard.
+- **Correct switching sequence**: always turns OFF first, then ON — prevents momentary power overshoot.
+- **Lock time**: ignores new triggers for a configurable duration after each stage change.
+- **Grid-import kill-switch**: emergency shutdown if grid import exceeds a threshold.
+- **Buffer tank detection**: detects when the thermostat cuts out (no power draw) and retries after 15 min.
+- **Logbook integration**: stage changes and buffer tank events written to HA History.
 
 ---
 
@@ -34,11 +45,11 @@ Each time the automation runs, it works through four priority levels in order:
 ```
 1. EMERGENCY SHUTDOWN (highest priority)
    Grid import > threshold OR surplus sensor unavailable
-   → All rods OFF immediately, persistent notification, stop.
+   → All rods OFF immediately, persistent notification (popup), stop.
 
 2. FAILSAFE SHUTDOWN
    Outside time window OR battery SOC < minimum
-   → All rods OFF, persistent notification, stop.
+   → All rods OFF, Logbook entry (no popup), stop.
 
 3. BUFFER TANK (only when triggered by a power sensor)
    All active rods draw no current for 2 min → buffer tank full
@@ -47,40 +58,63 @@ Each time the automation runs, it works through four priority levels in order:
 4. NORMAL STAGE CONTROL
    Asymmetric switching:
    → Stage UP:   immediately on any trigger
-   → Stage DOWN: only on 5-min periodic check AND battery SOC < 90 %
-                 (below 90 %: stage-down is immediate so battery keeps charging)
+   → Stage DOWN: immediately when SOC < 90%
+                 suppressed (battery buffers) when SOC ≥ 90% and current stage > Stage 1
+                 Stage 1 always switches down immediately (drain too slow to self-correct)
 ```
 
 ---
 
 ## Stage Table
 
+The stage table is computed automatically from the rod capacities you configure. The blueprint builds
+all valid rod combinations, sorts them by power, and removes duplicates (equal power → fewest rods).
+
+**Example — three rods with different capacities (1 kW / 2 kW / 3 kW)**
+
 | Stage | Rod 1 (1 kW) | Rod 2 (2 kW) | Rod 3 (3 kW) | Total |
 |-------|-------------|-------------|-------------|-------|
-| 0     | OFF | OFF | OFF | 0 kW |
-| 1     | ON  | OFF | OFF | 1 kW |
-| 2     | OFF | ON  | OFF | 2 kW |
-| 3     | OFF | OFF | ON  | 3 kW |
-| 4     | ON  | OFF | ON  | 4 kW |
-| 5     | OFF | ON  | ON  | 5 kW |
-| 6     | ON  | ON  | ON  | 6 kW |
+| 0 (off) | OFF | OFF | OFF | 0 kW |
+| 1 | ON  | OFF | OFF | 1 kW |
+| 2 | OFF | ON  | OFF | 2 kW |
+| 3 | OFF | OFF | ON  | 3 kW |
+| 4 | ON  | OFF | ON  | 4 kW |
+| 5 | OFF | ON  | ON  | 5 kW |
+| 6 | ON  | ON  | ON  | 6 kW |
+
+**Example — three equal rods (2 kW / 2 kW / 2 kW)**
+
+Duplicate power levels (all single-rod combos = 2 kW, all dual-rod combos = 4 kW) are
+automatically merged. The stage_table collapses to three meaningful levels:
+
+| Stage | Rod 1 | Rod 2 | Rod 3 | Total |
+|-------|-------|-------|-------|-------|
+| 0 (off) | OFF | OFF | OFF | 0 kW |
+| 1 | ON  | OFF | OFF | 2 kW |
+| 2 | ON  | ON  | OFF | 4 kW |
+| 3 | ON  | ON  | ON  | 6 kW |
+
+> **Wear leveling note**: for equal-capacity rods, the same combination is always selected for a
+> given power level (fewest-rods-first, stable sort order). To redistribute wear across rods,
+> swap their physical assignments in the blueprint configuration.
 
 ---
 
 ## Hysteresis
 
-To prevent rapid switching when the surplus oscillates around a threshold, the blueprint applies a configurable hysteresis:
+To prevent rapid switching when the surplus oscillates around a threshold, the blueprint applies a
+configurable hysteresis:
 
 - **Switching UP**: surplus must reach or exceed the stage threshold.
 - **Switching DOWN**: surplus must drop below **(threshold − hysteresis)** before the stage decreases.
 
-**Example** with default values (Stage 1 threshold: 1000 W, hysteresis: 200 W):
+**Example** with default values (stage threshold: 2000 W, hysteresis: 700 W):
 
 | Event | Surplus | Action |
 |-------|---------|--------|
-| Surplus rises | 1050 W | → Stage 1 ON (≥ 1000 W) |
-| Small drop | 950 W | → stays Stage 1 (≥ 800 W, within hysteresis) |
-| Surplus falls | 780 W | → Stage 0 OFF (< 800 W = 1000 − 200) |
+| Surplus rises | 2050 W | → Stage ON (≥ 2000 W) |
+| Cloud dip | 1400 W | → stays ON (≥ 1300 W, within hysteresis) |
+| Surplus falls | 1200 W | → Stage OFF (< 1300 W = 2000 − 700) |
 
 ---
 
@@ -89,30 +123,28 @@ To prevent rapid switching when the surplus oscillates around a threshold, the b
 Stage changes are intentionally asymmetric:
 
 - **Switching UP**: as soon as the surplus sensor reaches a threshold — immediate response.
-- **Switching DOWN**: only on the 5-minute periodic check, not on every sensor update.
+- **Switching DOWN**: suppressed when the battery SOC is ≥ 90% and the current stage is above Stage 1. The battery absorbs the shortfall until SOC drops to 89%.
 
-**Why**: When a cloud passes, the surplus sensor dips briefly while the battery automatically
-compensates (e.g. drops from 100 % to 96 % SOC — no grid power is drawn). Switching rods
-off and immediately back on wastes switching cycles and misses heating potential.
+**Why**: When a cloud passes, the surplus sensor dips while the battery automatically
+compensates. Switching rods off and immediately back on wastes switching cycles and misses
+heating potential. The battery buffers the difference at no grid cost.
 
-With this behaviour, rods keep running through short cloud shadows. Only a sustained
-deficit (persisting until the next 5-minute check) triggers a stage-down.
+**Why exempt Stage 1**: Stage 1 draws the minimum rod capacity (e.g. 1 kW). At that rate the
+battery would drain for 1+ hours before reaching 90% SOC — too long to hold a marginal stage.
+Stage 1 therefore switches down immediately when surplus is gone.
 
-| Event | Battery SOC | Action |
-|-------|-------------|--------|
-| Surplus rises above threshold | any | Stage UP immediately |
-| Brief cloud dip (< 5 min) | ≥ 90% | Skipped — battery buffers |
-| Brief cloud dip (< 5 min) | < 90% | Stage DOWN immediately — battery keeps charging |
-| Sustained low surplus (> 5 min) | any | Stage DOWN on periodic check |
-| Grid import detected | any | All rods OFF immediately |
-| Outside time window / low SOC | any | All rods OFF immediately |
+| Event | Battery SOC | Current Stage | Action |
+|-------|-------------|---------------|--------|
+| Surplus rises above threshold | any | any | Stage UP immediately |
+| Surplus drops (cloud / evening) | ≥ 90% | Stage 2+ | Held — battery buffers until SOC < 90% |
+| Surplus drops (cloud / evening) | ≥ 90% | Stage 1 | Stage DOWN immediately |
+| Surplus drops | < 90% | any | Stage DOWN immediately — battery keeps charging |
+| Grid import detected | any | any | All rods OFF immediately |
+| Outside time window / low SOC | any | any | All rods OFF (logbook entry) |
 
 **Why 90%**: below 90% SOC the battery is still charging. Letting it buffer heating rod
 load would conflict with the goal of ending the day with a full battery. Above 90% the
-battery is essentially full — a brief dip costs little and recharges quickly.
-
-The emergency shutdown (grid import) and failsafe (end_time, low battery SOC) always
-react immediately — the delay applies only to normal stage-down decisions.
+battery is essentially full — discharging a few percent costs little and recharges quickly.
 
 ---
 
@@ -123,18 +155,23 @@ react immediately — the delay applies only to normal stage-down decisions.
 | Input | Description | Required |
 |-------|-------------|----------|
 | **PV Surplus Sensor** | Sensor at the grid connection point. For Huawei EMMA: "Feed in power". | Yes |
-| **Surplus Sensor Sign Convention** | Toggle ON if your sensor reports negative values when feeding to the grid (e.g. Huawei EMMA). Leave OFF for sensors where positive = feed-in. | No (default: OFF) |
-| **Battery SOC Sensor** | Battery state of charge, 0–100 %. For Huawei EMMA: "State of capacity". | Yes |
-| **Grid Power Sensor** | Grid power for emergency shutdown. For Huawei EMMA: "Active power". Convention: positive = import, negative = export. | Recommended |
+| **Surplus Sensor Sign Convention** | Toggle ON if your sensor reports negative values when feeding to the grid (e.g. Huawei EMMA). Leave OFF where positive = feed-in. | No (default: OFF) |
+| **Battery SOC Sensor** | Battery state of charge, 0–100%. For Huawei EMMA: "State of capacity". | Yes |
+| **Grid Power Sensor** | Grid power for emergency shutdown. Convention: positive = import from grid. | Recommended |
 | **Maximum Tolerated Grid Import** | Emergency shutdown threshold in watts. Default 150 W. | No |
 
 ### Heating Rods
 
-| Input | Description |
-|-------|-------------|
-| **Switch for Rod 1 (1 kW)** | Switch entity controlling the 1 kW heating rod. |
-| **Switch for Rod 2 (2 kW)** | Switch entity controlling the 2 kW heating rod. |
-| **Switch for Rod 3 (3 kW)** | Switch entity controlling the 3 kW heating rod. |
+| Input | Description | Required |
+|-------|-------------|----------|
+| **Switch — Rod 1** | Switch entity for the first heating rod. | Yes |
+| **Rod 1 Capacity (kW)** | Power rating of rod 1. Default 2.0 kW. | Yes |
+| **Switch — Rod 2** | Switch entity for the second rod. Leave empty if not present. | No |
+| **Rod 2 Capacity (kW)** | Power rating of rod 2. Default 2.0 kW. Only used when Rod 2 switch is set. | No |
+| **Switch — Rod 3** | Switch entity for the third rod. Leave empty if not present. | No |
+| **Rod 3 Capacity (kW)** | Power rating of rod 3. Default 2.0 kW. Only used when Rod 3 switch is set. | No |
+
+Stage thresholds are derived automatically from these capacities — no separate threshold configuration.
 
 ### Operation Settings
 
@@ -142,24 +179,10 @@ react immediately — the delay applies only to normal stage-down decisions.
 |-------|---------|-------------|
 | **Start Time** | 08:00 | Rods only operate after this time. |
 | **End Time** | 18:00 | All rods shut down at this time (hard trigger). |
-| **Minimum Battery SOC** | 60 % | Rods disabled when battery drops below this. |
-| **Hysteresis** | 200 W | Deadband below threshold before switching down. |
-| **Lock Time After Switching** | 2 min | New triggers ignored after a stage change (max 5 min). |
-
-### Stage Thresholds
-
-Six configurable watt thresholds — one per stage. Defaults match a system with 1/2/3 kW rods:
-
-| Input | Default |
-|-------|---------|
-| Stage 1 (Rod 1 only, 1 kW) | 1000 W |
-| Stage 2 (Rod 2 only, 2 kW) | 2000 W |
-| Stage 3 (Rod 3 only, 3 kW) | 3000 W |
-| Stage 4 (Rod 1 + Rod 3, 4 kW) | 4000 W |
-| Stage 5 (Rod 2 + Rod 3, 5 kW) | 5000 W |
-| Stage 6 (all rods, 6 kW) | 6000 W |
-
-Thresholds must be configured in ascending order. Inverted thresholds cause undefined behavior.
+| **Minimum Battery SOC** | 60% | Rods disabled when battery drops below this. |
+| **Battery Capacity (kWh)** | 10 kWh | Total usable battery capacity — shown in log messages alongside SOC%. Does not affect switching logic. |
+| **Hysteresis** | 700 W | Deadband below threshold before switching down. Increase to reduce oscillation. |
+| **Lock Time After Switching** | 5 min | New triggers ignored after a stage change (max 10 min). |
 
 ### Power Monitoring (Optional)
 
@@ -176,7 +199,7 @@ Enables buffer tank detection. Requires a smart plug with power monitoring (e.g.
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| **Enable Logging** | ON | Writes stage changes and buffer tank events to the HA Logbook (History). Failsafe and emergency shutdowns always create a persistent notification regardless of this setting. |
+| **Enable Logging** | ON | Writes stage changes and buffer tank events to the HA Logbook. Failsafe and emergency shutdowns always create a persistent notification regardless of this setting. |
 
 ---
 
@@ -184,16 +207,16 @@ Enables buffer tank detection. Requires a smart plug with power monitoring (e.g.
 
 Different inverter brands report grid power with different sign conventions:
 
-| Sensor value | Meaning — Positive convention | Meaning — Negative convention |
-|-------------|-------------------------------|-------------------------------|
+| Sensor value | Positive convention | Negative convention |
+|-------------|--------------------|--------------------|
 | `2500` | 2500 W feeding to grid → rods can run | 2500 W imported from grid → rods must be OFF |
 | `-2500` | 2500 W imported from grid | 2500 W feeding to grid → rods can run |
 
-**Huawei EMMA** ("Feed in power") uses the **negative convention** — enable the **Surplus Sensor Sign Convention** toggle in the blueprint.
+**Huawei EMMA** ("Feed in power") uses the **negative convention** — enable the **Surplus Sensor Sign Convention** toggle.
 
 **SMA, SolarEdge, Fronius export sensors** typically use the **positive convention** — leave the toggle OFF.
 
-If you are unsure: check the sensor value in **Developer Tools → States** while your system is clearly feeding to the grid. If the value is negative → enable the toggle.
+If unsure: check the sensor value in **Developer Tools → States** while your system is clearly feeding to the grid. Negative value → enable the toggle.
 
 ---
 
@@ -201,40 +224,65 @@ If you are unsure: check the sensor value in **Developer Tools → States** whil
 
 The grid sensor (for emergency shutdown) always uses: **positive = importing from grid**.
 
-For Huawei EMMA "Active power": positive value means drawing from grid, negative means exporting. This matches the expected convention — no inversion needed.
+For Huawei EMMA "Active power": positive = drawing from grid, negative = exporting. This matches the expected convention — no inversion needed.
 
 ---
 
 ## Buffer Tank Detection
 
-When power sensors are configured for the heating rods, the blueprint detects when the buffer tank thermostat cuts the rods out:
+When power sensors are configured, the blueprint detects when the buffer tank thermostat cuts the rods out:
 
-1. Rod switch is ON, but measured power stays below the cutoff threshold for 2 minutes → buffer tank is full
+1. Rod switch is ON but measured power stays below the cutoff threshold for 2 minutes → buffer tank full
 2. All rods are turned off and a Logbook entry is written
 3. After 15 minutes, the blueprint re-evaluates the surplus and turns rods back on if conditions are met
 4. After 2 more minutes, it checks whether the rods are actually drawing power
 5. If they are → Logbook: "retry successful, buffer cooling"
-6. If not → rods turned off again, cycle repeats automatically when power stays low for another 2 minutes
+6. If not → rods turned off again; cycle repeats when power stays low for another 2 minutes
 
 ---
 
 ## Safety
 
+### Notifications
+
+The blueprint distinguishes between routine shutdowns and real problems:
+
+| Event | Notification type |
+|-------|-------------------|
+| Daily end-time shutdown | Logbook entry only (no popup) |
+| Battery SOC below minimum | Logbook entry only (no popup) |
+| Grid import exceeds threshold | **Persistent notification (popup)** |
+| Surplus sensor unavailable, rods ON | **Persistent notification (popup)** |
+
+Routine shutdowns happen every day and are expected — they only write to the HA Logbook
+(visible under **History** for the automation entity). Only genuine faults that require your
+attention create a popup in the HA notification panel.
+
 ### Failsafe Shutdown
 
-Rods are shut down (with a persistent notification) when:
+Rods are shut down silently (Logbook entry only) when:
 - Current time is outside the configured time window (`end_time` fires an explicit trigger)
 - Battery SOC drops below the configured minimum
 
 ### Emergency Grid-Import Shutdown
 
-When a grid sensor is configured, an emergency shutdown triggers immediately if grid import exceeds the threshold — regardless of lock delays or retry cycles. A persistent notification is always created.
+When a grid sensor is configured, an emergency shutdown triggers immediately if grid import exceeds the
+threshold — regardless of lock delays or retry cycles. A **persistent notification (popup)** is always
+created because this indicates a configuration problem or unexpected behaviour that needs attention.
 
-**Note**: The emergency shutdown cannot interrupt an active lock delay or buffer tank retry cycle because `mode: single` prevents re-entry during delays. Keep the lock time low (default 2 min) to minimize this window. For a hard real-time grid guard, add a separate automation outside this blueprint.
+**Note**: The emergency shutdown cannot interrupt an active lock delay because `mode: single` prevents
+re-entry during delays. Keep the lock time low (default 5 min) to minimize this window. For a hard
+real-time grid guard, add a separate automation outside this blueprint.
 
 ### Invalid Sensor Safety
 
-If the surplus sensor reports `unavailable` or `unknown` and any rod is ON, all rods are immediately shut down.
+If the surplus sensor reports `unavailable` or `unknown` and any rod is ON, all rods are immediately
+shut down and a **persistent notification (popup)** is created.
+
+### Unrecognised Switch Combination
+
+If rods are manually switched to a combination not in the stage_table (e.g. via the HA UI), the
+blueprint detects this and turns everything off on the next run, restoring a known-good state.
 
 ---
 
@@ -264,45 +312,44 @@ Exact entity IDs depend on your integration version and device naming in Home As
 3. Create a new automation from the blueprint and configure:
 
    **Sensors section**
-   - Select your surplus sensor (e.g. EMMA "Feed in power")
-   - Enable the sign convention toggle if your sensor reports negative values for feed-in (Huawei EMMA)
+   - Select your surplus sensor and configure the sign convention
    - Select your battery SOC sensor
    - Select your grid power sensor (strongly recommended)
 
    **Heating Rods section**
-   - Assign the switch for each heating rod
+   - Assign the switch and capacity for each rod you have (Rod 2 and Rod 3 are optional)
 
    **Operation Settings section**
-   - Set your start/end times
-   - Set the minimum battery SOC (default 60%)
+   - Set your start/end times and minimum battery SOC
+   - Enter your battery capacity in kWh (for log display)
    - Adjust hysteresis and lock time if needed
 
-   **Stage Thresholds section** (collapsed by default)
-   - Defaults match a 1/2/3 kW rod system — adjust only if your rods have different power ratings
-
-   **Power Monitoring section** (collapsed by default, optional)
+   **Power Monitoring section** (collapsed, optional)
    - Assign power sensors if available (e.g. Nous D3T)
    - Leave empty to disable buffer tank detection
 
-   **Logging section** (collapsed by default)
+   **Logging section** (collapsed)
    - Enable to write stage changes to the HA Logbook
 
 ---
 
-## Upgrading from v1.3.4
+## Upgrading from v2.x
 
-The inputs `pv_generation_sensor` and `internal_consumption_sensor` have been replaced by a single `surplus_sensor`. When upgrading, create a new automation instance and configure it from scratch.
+**Breaking change**: the Stage Thresholds section has been removed. Stage thresholds are now computed
+automatically from the rod capacities you configure in the Heating Rods section.
 
-Major changes in v2.0:
-- Single surplus sensor input instead of PV minus consumption
+When upgrading, create a new automation instance and reconfigure from scratch. The key difference:
+
+| v2.x | v3.0 |
+|------|------|
+| 6 manual threshold inputs (W each) | Rod capacity inputs (kW each) per rod |
+| All 3 rods required | Rod 2 and Rod 3 are optional |
+| No battery kWh input | Battery Capacity (kWh) for log display |
+| Lock time max 5 min | Lock time max 10 min |
+
+Major changes in earlier versions:
+- v2.0: Single surplus sensor input, hysteresis, correct switching sequence, lock time, failsafe, buffer tank, grid kill-switch, logbook
 - v2.1: Configurable sign convention — no template sensor needed for Huawei EMMA
-- Hysteresis to prevent oscillation
-- Correct switching sequence (OFF before ON)
-- Lock time via `mode: single` (was broken in v1.3.4)
-- Failsafe shutdown now actually fires at `end_time`
-- Buffer tank detection with automatic retry cycle
-- Grid-import emergency kill-switch
-- Logbook integration
 
 ---
 
@@ -318,9 +365,9 @@ Major changes in v2.0:
 ## Known Limitations
 
 - Overnight time windows (e.g. 23:00 to 01:00) are not supported
-- Stage thresholds must be in ascending order — not validated at runtime
 - The grid-import kill-switch cannot interrupt an active lock delay (see Safety section)
-- Stage-down decisions are delayed up to 5 minutes (periodic check) — intentional, see Asymmetric Switching
+- Stage-down (Stage 2+) is held until SOC drops below 90% when battery is full — intentional, see Asymmetric Switching
+- Wear leveling for equal-capacity rods: same combination always selected; rotate rods manually if needed
 
 ---
 
