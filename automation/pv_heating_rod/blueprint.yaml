@@ -2,7 +2,7 @@
 blueprint:
   name: PV Heating Rod Automation
   description: |
-    Version 3.0
+    Version 3.1
     Controls up to three heating rods based on actual PV feed-in surplus.
 
     Stage thresholds are computed automatically from the configured rod capacities.
@@ -23,7 +23,10 @@ blueprint:
     - Battery capacity (kWh): displayed in log messages alongside SOC%.
     - Failsafe shutdown: at end_time or when battery SOC drops below minimum.
     - Correct switching sequence: always turn OFF first, then ON.
-    - Notifications only on stage changes.
+    - Buffer tank temperature sensor (optional): when the buffer reaches a configurable
+      temperature threshold, the retry wait after a thermostated shutdown is extended
+      from 15 to 60 minutes — prevents rapid cycling when the buffer is already hot.
+    - Logbook entries on stage changes, failsafe shutdowns, emergency shutdowns, and buffer tank events.
     - Lock time respected via mode: single.
 
     Known limitations:
@@ -159,7 +162,7 @@ blueprint:
       input:
         start_time:
           name: Automation Start Time
-          default: "08:00:00"
+          default: "09:00:00"
           selector:
             time: {}
 
@@ -230,7 +233,8 @@ blueprint:
           description: >
             Power consumption sensor for heating rod 1 (e.g. Nous D3T).
             When configured, the automation detects when the rod's internal thermostat
-            cuts out (buffer tank full) and retries after 15 minutes.
+            cuts out (buffer tank full) and retries after a wait (15 min by default;
+            60 min when a buffer temperature sensor is configured and above the threshold).
             Leave empty if no power monitoring is available.
           default: {}
           selector:
@@ -267,6 +271,41 @@ blueprint:
               unit_of_measurement: W
               step: 10
 
+    buffer_temp_section:
+      name: Buffer Tank Temperature (Optional)
+      collapsed: true
+      input:
+        buffer_temp_sensor:
+          name: Buffer Tank Temperature Sensor (optional)
+          description: >
+            Temperature sensor for the buffer tank, typically the lowest sensor
+            (e.g. "Pufferspeicher unten"). When no rod current is detected for
+            2+ minutes and this sensor reads at or above the threshold below,
+            the retry wait is extended to 60 minutes instead of 15.
+            Requires at least one Power Sensor to be configured above.
+            Leave empty to keep the standard 15-minute retry wait.
+          default: {}
+          selector:
+            entity:
+              domain: sensor
+              device_class: temperature
+
+        buffer_temp_threshold:
+          name: Buffer Threshold Temperature (°C)
+          description: >
+            When the buffer sensor is at or above this value during a thermostated
+            shutdown, the retry wait is extended to 60 minutes. Set this to the
+            temperature below which the buffer has cooled enough to absorb more heat —
+            typically 5–10 °C below the rod's thermostat cutoff
+            (e.g. 55 °C when the thermostat cuts at 60 °C).
+          default: 55
+          selector:
+            number:
+              min: 30
+              max: 85
+              step: 1
+              unit_of_measurement: "°C"
+
     logging_section:
       name: Logging
       collapsed: true
@@ -274,8 +313,7 @@ blueprint:
         enable_logging:
           name: Enable Logging
           description: >
-            When enabled, stage changes are written to the Home Assistant Logbook.
-            Failsafe shutdowns always create a persistent notification regardless of this setting.
+            When enabled, stage changes and all shutdowns are written to the Home Assistant Logbook.
           default: true
           selector:
             boolean: {}
@@ -361,6 +399,8 @@ action:
       v_grid_sensor: !input grid_sensor
       v_max_grid_import: !input max_grid_import
       v_invert_surplus: !input surplus_sensor_inverted
+      v_buffer_temp_sensor: !input buffer_temp_sensor
+      v_buffer_temp_threshold: !input buffer_temp_threshold
 
   # Block 2: Compute per-rod capacity in watts.
   # cap2_w / cap3_w are 0 when the corresponding switch input is left empty (default: {}).
@@ -463,9 +503,9 @@ action:
             {{ [v_switch_p1]
                + ([v_switch_p2] if v_switch_p2 not in [{}, ''] else [])
                + ([v_switch_p3] if v_switch_p3 not in [{}, ''] else []) }}
-      - action: persistent_notification.create
+      - action: logbook.log
         data:
-          title: "PV Heating Rod — EMERGENCY SHUTDOWN"
+          name: "PV Heating Rod — Emergency Shutdown"
           message: >
             {% if grid_import_detected %}
             Grid import detected: {{ grid_power | round(0) }} W
@@ -473,8 +513,10 @@ action:
             {% else %}
             Surplus sensor is {{ states(v_surplus_sensor) }} — cannot verify safe conditions.
             {% endif %}
-            All rods turned off immediately to prevent heating with grid power.
+            All rods turned off immediately.
             (trigger: {{ trigger.platform }})
+          entity_id: "{{ v_switch_p1 }}"
+          domain: automation
       - stop: "Emergency safety shutdown — grid import or invalid surplus sensor"
 
   # Block 8: Combined thermostat monitoring state.
@@ -525,11 +567,13 @@ action:
   # Hysteresis rule: a stage DOWN only executes when surplus has dropped below
   # (current_stage_power_w - hysteresis). Stages UP are never delayed by hysteresis.
   # SOC buffer: when SOC >= 90% and current stage > Stage 1, stage-down is suppressed on all
-  # triggers — the battery absorbs the shortfall. Stage 1 (cap1_w) is exempt: drain rate is
+  # triggers — the battery absorbs the shortfall. Stage 1 (idx=0) is exempt: drain rate is
   # low enough that it would stay on for 1+ hours, so it switches down immediately.
+  # Uses current_stage_idx <= 0 (not a power comparison) so that Stage 1 is correctly
+  # identified regardless of which rod has the minimum capacity.
   - variables:
       trigger_allows_stage_down: >
-        {{ battery_soc < 90 or current_stage_power_w | int <= cap1_w | int }}
+        {{ battery_soc < 90 or current_stage_idx | int <= 0 }}
       desired_stage_idx: >-
         {%- set raw    = raw_desired_stage_idx | int -%}
         {%- set cur    = current_stage_idx | int -%}
@@ -576,6 +620,7 @@ action:
             {{ [v_switch_p1]
                + ([v_switch_p2] if v_switch_p2 not in [{}, ''] else [])
                + ([v_switch_p3] if v_switch_p3 not in [{}, ''] else []) }}
+      - stop: "Safeguard — unrecognised switch combination, rods turned off"
 
   # Power monitoring: buffer tank management with auto-retry cycle
   - if:
@@ -590,6 +635,11 @@ action:
                   {{ trigger.to_state.state | float(999) < v_cutoff and
                      all_on_monitored_thermostated }}
             sequence:
+              - variables:
+                  retry_wait_minutes: >
+                    {{ 60 if v_buffer_temp_sensor not in [{}, '']
+                             and states(v_buffer_temp_sensor) | float(0) >= v_buffer_temp_threshold | float
+                       else 15 }}
               - if:
                   - condition: template
                     value_template: "{{ v_logging }}"
@@ -599,7 +649,7 @@ action:
                       name: "PV Heating Rod — Buffer Tank"
                       message: >
                         All active rods have drawn no current for 2+ minutes — buffer tank full.
-                        Turning off all rods. Retry in 15 minutes.
+                        Turning off all rods. Retry in {{ retry_wait_minutes }} minutes.
                       entity_id: "{{ v_switch_p1 }}"
                       domain: automation
               - action: switch.turn_off
@@ -608,7 +658,8 @@ action:
                     {{ [v_switch_p1]
                        + ([v_switch_p2] if v_switch_p2 not in [{}, ''] else [])
                        + ([v_switch_p3] if v_switch_p3 not in [{}, ''] else []) }}
-              - delay: "00:15:00"
+              - delay:
+                  minutes: "{{ retry_wait_minutes }}"
               # Re-read all sensors after the wait to get fresh desired stage
               - variables:
                   retry_surplus: >-
@@ -762,7 +813,7 @@ action:
                         data:
                           name: "PV Heating Rod — Buffer Tank"
                           message: >
-                            Retry skipped after 15 min wait:
+                            Retry skipped after {{ retry_wait_minutes }} min wait:
                             {{ 'outside time window' if not retry_in_window
                                else 'battery SOC too low (' ~ (retry_soc | round(1)) ~ '%)'
                                if not retry_battery_ok

@@ -20,7 +20,7 @@ except ImportError:
 
 BLUEPRINT_FILE = Path(__file__).parent / "blueprint.yaml"
 README_FILE = Path(__file__).parent / "README.md"
-EXPECTED_VERSION = "3.0"
+EXPECTED_VERSION = "3.1"
 
 ok = []
 warnings = []
@@ -115,6 +115,7 @@ REQUIRED_INPUTS = {
     "battery_limit", "hysteresis_watts", "lock_time_after_switching",
     "switch_p1_power", "switch_p2_power", "switch_p3_power",
     "thermostat_cutoff_threshold", "enable_logging",
+    "buffer_temp_sensor", "buffer_temp_threshold",
 }
 missing_inputs = REQUIRED_INPUTS - declared_inputs
 check(not missing_inputs, "All required inputs declared", f"Missing inputs: {missing_inputs}")
@@ -201,9 +202,35 @@ check(
     "5-minute periodic trigger missing",
 )
 
-check("EMERGENCY SHUTDOWN" in action_text, "Emergency shutdown notification present", "Emergency shutdown notification missing")
-check("Failsafe" in action_text, "Failsafe shutdown notification present", "Failsafe shutdown notification missing")
-check("persistent_notification.create" in action_text, "persistent_notification.create present", "persistent_notification.create missing")
+check("Emergency Shutdown" in action_text, "Emergency shutdown log entry present", "Emergency shutdown log entry missing")
+check("Failsafe" in action_text, "Failsafe shutdown present", "Failsafe shutdown missing from action")
+check(
+    "persistent_notification.create" not in action_text,
+    "No persistent_notification popup (logbook only, no intrusive notifications)",
+    "persistent_notification.create still present — replace with logbook.log",
+    warn=True,
+)
+emergency_block_start = action_text.find("# Emergency safety shutdown")
+emergency_region = action_text[emergency_block_start:emergency_block_start + 800] if emergency_block_start >= 0 else ""
+check(
+    emergency_block_start >= 0 and "logbook.log" in emergency_region,
+    "Emergency shutdown uses logbook.log",
+    "Emergency shutdown logbook.log entry missing",
+)
+failsafe_comment_pos = action_text.find("# FAILSAFE:")
+failsafe_region = action_text[failsafe_comment_pos:failsafe_comment_pos + 2000] if failsafe_comment_pos >= 0 else ""
+check(
+    failsafe_comment_pos >= 0 and "logbook.log" in failsafe_region,
+    "Failsafe shutdown uses logbook.log",
+    "Failsafe logbook.log entry missing from failsafe section",
+    warn=True,
+)
+check(
+    "retry_wait_minutes" in action_text,
+    "Temperature-based retry wait (retry_wait_minutes) present in power monitor",
+    "retry_wait_minutes missing — buffer tank retry always uses fixed 15-min wait",
+    warn=True,
+)
 check("switch.turn_off" in action_text, "switch.turn_off present", "switch.turn_off missing")
 check("mode: single" in raw, "mode: single set", "mode: single missing")
 check("max_exceeded: silent" in raw, "max_exceeded: silent set", "max_exceeded: silent missing")
@@ -222,6 +249,14 @@ check(
     "Safeguard for unrecognised switch combination present",
     "Safeguard for unrecognised switch combination missing (desired=-1 and current=-1 and any_rod_on)",
     warn=True,
+)
+# Safeguard must have its own stop: to prevent fallthrough into the power-monitor branch
+safeguard_start = action_text.find("current_stage_idx | int == -1")
+safeguard_region = action_text[safeguard_start:safeguard_start + 600] if safeguard_start >= 0 else ""
+check(
+    "- stop:" in safeguard_region,
+    "Safeguard block has stop: action (prevents power-monitor fallthrough)",
+    "Safeguard block missing stop: — execution falls through to power-monitor branch after rods turned off",
 )
 
 # ---------------------------------------------------------------------------
