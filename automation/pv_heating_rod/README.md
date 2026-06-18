@@ -1,7 +1,7 @@
 
 # PV Heating Rod Automation Blueprint for Home Assistant
 
-Version 3.1 — Controls up to three heating rods based on PV feed-in surplus and battery state of charge.
+Version 3.2 — Controls up to three heating rods based on PV feed-in surplus and battery state of charge.
 
 ---
 
@@ -368,6 +368,9 @@ When upgrading, create a new automation instance and reconfigure from scratch. T
 Major changes in earlier versions:
 - v2.0: Single surplus sensor input, hysteresis, correct switching sequence, lock time, failsafe, buffer tank, grid kill-switch, logbook
 - v2.1: Configurable sign convention — no template sensor needed for Huawei EMMA
+- v3.0: Dynamic stage table, SOC-based asymmetric switching, reduced notifications
+- v3.1: Buffer tank temperature sensor, logbook-only notifications
+- v3.2: Anti-cycling — failed buffer-tank retries hold the rods off for the full retry wait, and the periodic trigger re-detects a stuck thermostated state missed during a lock delay (fixes rapid on/off when the target temperature is reached)
 
 ---
 

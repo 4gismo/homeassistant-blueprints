@@ -2,7 +2,7 @@
 blueprint:
   name: PV Heating Rod Automation
   description: |
-    Version 3.1
+    Version 3.2
     Controls up to three heating rods based on actual PV feed-in surplus.
 
     Stage thresholds are computed automatically from the configured rod capacities.
@@ -26,6 +26,9 @@ blueprint:
     - Buffer tank temperature sensor (optional): when the buffer reaches a configurable
       temperature threshold, the retry wait after a thermostated shutdown is extended
       from 15 to 60 minutes — prevents rapid cycling when the buffer is already hot.
+    - Anti-cycling (v3.2): after a failed buffer-tank retry the rods are held off for the
+      full retry wait (mode: single), and the periodic trigger re-detects a stuck
+      thermostated state that the 2-minute power trigger missed during a lock delay.
     - Logbook entries on stage changes, failsafe shutdowns, emergency shutdowns, and buffer tank events.
     - Lock time respected via mode: single.
 
@@ -623,17 +626,25 @@ action:
       - stop: "Safeguard — unrecognised switch combination, rods turned off"
 
   # Power monitoring: buffer tank management with auto-retry cycle
+  # Also fires on periodic triggers when all monitored rods are thermostated —
+  # catches the case where the "below for 2 min" trigger was silently dropped
+  # by mode:single during the lock time after a stage change.
   - if:
       - condition: template
-        value_template: "{{ trigger_is_power_sensor }}"
+        value_template: >
+          {{ trigger_is_power_sensor or
+             (trigger.platform == 'time_pattern' and all_on_monitored_thermostated) }}
     then:
       - choose:
-          # --- CASE 1: all monitored ON rods below threshold for 2+ min → buffer full ---
+          # --- CASE 1: all monitored ON rods below threshold → buffer full ---
+          # For power_sensor triggers: triggered by "below threshold for 2 min".
+          # For time_pattern triggers: all_on_monitored_thermostated already confirmed above.
           - conditions:
               - condition: template
                 value_template: >
-                  {{ trigger.to_state.state | float(999) < v_cutoff and
-                     all_on_monitored_thermostated }}
+                  {{ all_on_monitored_thermostated and
+                     (not trigger_is_power_sensor or
+                      trigger.to_state.state | float(999) < v_cutoff) }}
             sequence:
               - variables:
                   retry_wait_minutes: >
@@ -799,10 +810,13 @@ action:
                                 Rod 1: {{ chk_p1 | round(0) if chk_p1 >= 0 else 'no sensor' }} W,
                                 Rod 2: {{ chk_p2 | round(0) if chk_p2 >= 0 else 'no sensor' }} W,
                                 Rod 3: {{ chk_p3 | round(0) if chk_p3 >= 0 else 'no sensor' }} W.
-                                Next retry starts when rod power stays below
-                                {{ v_cutoff }} W for 2 minutes.
+                                Waiting {{ retry_wait_minutes }} min before releasing control.
                               entity_id: "{{ v_switch_p1 }}"
                               domain: automation
+                      # Hold mode:single locked so normal triggers cannot immediately
+                      # re-enable the rods while the buffer is still full.
+                      - delay:
+                          minutes: "{{ retry_wait_minutes }}"
                 else:
                   # No surplus / outside window after 15 min: stay off, log reason
                   - if:
@@ -824,10 +838,12 @@ action:
               - stop: "Buffer tank retry cycle complete"
 
           # --- CASE 2: single rod thermostated (not all) — log only ---
+          # Only for power_sensor triggers: guard prevents accessing trigger.to_state
+          # on time_pattern triggers (which are only routed here via CASE 1 anyway).
           - conditions:
               - condition: template
                 value_template: >
-                  {{ v_logging and
+                  {{ v_logging and trigger_is_power_sensor and
                      trigger.to_state.state | float(999) < v_cutoff and
                      not all_on_monitored_thermostated }}
             sequence:

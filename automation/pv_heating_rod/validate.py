@@ -1,5 +1,5 @@
 """
-Validator for PV Heating Rod Blueprint v3.0
+Validator for PV Heating Rod Blueprint v3.2
 
 Checks structural correctness, safety features, and cross-file consistency.
 Run from the blueprint directory:
@@ -20,7 +20,7 @@ except ImportError:
 
 BLUEPRINT_FILE = Path(__file__).parent / "blueprint.yaml"
 README_FILE = Path(__file__).parent / "README.md"
-EXPECTED_VERSION = "3.1"
+EXPECTED_VERSION = "3.2"
 
 ok = []
 warnings = []
@@ -231,6 +231,31 @@ check(
     "retry_wait_minutes missing — buffer tank retry always uses fixed 15-min wait",
     warn=True,
 )
+
+pm_start = action_text.find("# Power monitoring: buffer tank")
+pm_region = action_text[pm_start:pm_start + 700] if pm_start >= 0 else ""
+check(
+    pm_start >= 0 and "time_pattern" in pm_region and "all_on_monitored_thermostated" in pm_region,
+    "Power-monitor if fires on periodic trigger when all rods thermostated",
+    "Power-monitor if lacks periodic trigger fallback — stuck-thermostated state not detected after lock",
+)
+
+case2_pos = action_text.find("# --- CASE 2:")
+case2_region = action_text[case2_pos:case2_pos + 600] if case2_pos >= 0 else ""
+check(
+    case2_pos >= 0 and "trigger_is_power_sensor" in case2_region,
+    "CASE 2 guards trigger.to_state with trigger_is_power_sensor",
+    "CASE 2 condition missing trigger_is_power_sensor guard — template error on periodic triggers",
+)
+
+retry_failed_pos = action_text.find("Retry failed")
+retry_failed_region = action_text[retry_failed_pos:retry_failed_pos + 800] if retry_failed_pos >= 0 else ""
+check(
+    retry_failed_pos >= 0 and "delay:" in retry_failed_region and "retry_wait_minutes" in retry_failed_region,
+    "Failed retry holds mode:single via extra delay (prevents immediate rod re-enable)",
+    "Failed retry missing hold delay — normal triggers re-enable rods immediately after retry failure",
+)
+
 check("switch.turn_off" in action_text, "switch.turn_off present", "switch.turn_off missing")
 check("mode: single" in raw, "mode: single set", "mode: single missing")
 check("max_exceeded: silent" in raw, "max_exceeded: silent set", "max_exceeded: silent missing")
